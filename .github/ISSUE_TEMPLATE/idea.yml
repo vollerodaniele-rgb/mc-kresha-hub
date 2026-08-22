@@ -1,0 +1,25 @@
+name: "💡 Drop an idea"
+description: "Pitch an idea for the MC Kresha project: a video concept, a feature, a sample, a city, anything."
+title: "Idea: "
+labels: ["idea"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing to the project! Keep it short and vivid.
+        The best ideas make it into the film.
+  - type: textarea
+    id: the-idea
+    attributes:
+      label: Your idea
+      description: "What is the idea? Paint the scene."
+      placeholder: "Example: a video shot entirely on VHS, one location, one night..."
+    validations:
+      required: true
+  - type: input
+    id: name
+    attributes:
+      label: Your name or alias (optional)
+      placeholder: "How should we credit you if we use it?"
+    validations:
+      required: false
