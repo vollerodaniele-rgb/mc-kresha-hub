@@ -28,7 +28,10 @@ async function loadIdeas() {
   try {
     const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/issues` +
       `?labels=${encodeURIComponent(CONFIG.ideaLabel)}&state=open&sort=created&direction=desc&per_page=50`;
-    const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
+    const res = await fetch(url, {
+      headers: { Accept: "application/vnd.github+json" },
+      cache: "no-store"
+    });
     if (!res.ok) throw new Error("GitHub API " + res.status);
     const issues = await res.json();
 
