@@ -1,6 +1,6 @@
-# MC KRESHA | Idea Box
+# MC KRESHA | The Last Chapter
 
-A single-page idea box for the MC Kresha project. Anyone can drop an idea straight
+A single-page idea box ("The Last Chapter") for the MC Kresha project. Anyone can drop an idea straight
 on the page, no account needed. Static site on GitHub Pages, no build step.
 
 Live: https://vollerodaniele-rgb.github.io/mc-kresha-hub/
