@@ -83,8 +83,15 @@ async function fetchIdeas(state) {
       author = m[1];
       body = body.slice(0, m.index);
     }
+    let image = "";
+    const img = body.match(/!\[[^\]]*\]\((https:\/\/[^\s)]+)\)/);
+    if (img) {
+      image = img[1];
+      body = body.replace(img[0], "");
+    }
     return {
       number: i.number,
+      image,
       text: clean(body) || i.title.replace(/^Idea:\s*/, ""),
       author,
       date: new Date(i.created_at).toLocaleDateString("en-GB",
@@ -111,6 +118,15 @@ function renderList(wrap, ideas, isRemoved) {
   for (const idea of ideas) {
     const row = document.createElement("div");
     row.className = "idea-row" + (isRemoved ? " removed" : "");
+
+    if (idea.image) {
+      const thumb = document.createElement("img");
+      thumb.className = "thumb";
+      thumb.src = idea.image;
+      thumb.alt = "";
+      thumb.loading = "lazy";
+      row.appendChild(thumb);
+    }
 
     const text = document.createElement("div");
     text.className = "text";

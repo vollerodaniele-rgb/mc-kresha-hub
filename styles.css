@@ -107,6 +107,66 @@ body {
   flex-wrap: wrap;
 }
 
+/* ============ PICTURE FIELD ============ */
+.pic-field { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.pic-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.pic-row { display: flex; align-items: center; gap: 0.9rem; flex-wrap: wrap; }
+
+.btn-file {
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.45rem 1.1rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.btn-file:hover { border-color: var(--text); }
+.btn-file input { display: none; }
+
+.pic-name { font-size: 0.85rem; }
+
+.btn-clear {
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  background: none;
+  border: none;
+  color: var(--dim);
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.btn-clear:hover { color: var(--text); }
+
+.pic-preview {
+  max-width: 12rem;
+  max-height: 9rem;
+  width: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  object-fit: cover;
+}
+
+.idea-image {
+  width: 100%;
+  border-radius: 8px;
+  border: 1px solid var(--line-soft);
+  display: block;
+}
+
 .btn-send {
   font-family: var(--font-body);
   font-size: 0.82rem;

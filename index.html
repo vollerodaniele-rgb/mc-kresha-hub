@@ -30,6 +30,19 @@
           <textarea id="idea-text" rows="4" maxlength="1000" required
             placeholder="Paint the scene... example: a video shot entirely on VHS, one location, one night."></textarea>
         </label>
+        <div class="pic-field">
+          <span class="pic-label">Picture (optional)</span>
+          <div class="pic-row">
+            <label class="btn-file">
+              Choose a picture
+              <input id="idea-image" type="file" accept="image/*">
+            </label>
+            <span class="pic-name muted" id="pic-name">No picture chosen</span>
+            <button type="button" class="btn-clear" id="pic-clear" hidden>Remove picture</button>
+          </div>
+          <img id="pic-preview" class="pic-preview" alt="" hidden>
+        </div>
+
         <div class="form-row">
           <label class="field">
             <span>Name or alias (optional)</span>

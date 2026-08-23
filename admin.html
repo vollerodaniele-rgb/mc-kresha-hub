@@ -49,6 +49,10 @@
       display: flex; gap: 1.2rem; align-items: flex-start; flex-wrap: wrap;
     }
     .idea-row.removed { opacity: 0.5; }
+    .idea-row .thumb {
+      width: 5rem; height: 5rem; object-fit: cover;
+      border: 1px solid var(--line); border-radius: 8px; flex-shrink: 0;
+    }
     .idea-row .text { flex: 1; min-width: 14rem; font-size: 0.94rem; }
     .idea-row .meta {
       margin-top: 0.45rem; font-size: 0.78rem; color: var(--dim);

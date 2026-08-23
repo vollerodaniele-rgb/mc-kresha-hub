@@ -10,6 +10,9 @@ Live: https://vollerodaniele-rgb.github.io/mc-kresha-hub/
 - The form posts to a Cloudflare Worker relay (source in [`cloudflare-worker/`](cloudflare-worker/README.md)),
   which files each idea as a GitHub issue labeled `idea`.
 - The wall reads open `idea` issues back from the public GitHub API.
+- A picture can be attached to an idea. The browser resizes it to 1600px and re-encodes
+  it as JPEG (which also strips location data), the relay stores it on the `uploads`
+  branch, and the issue body links to it. Uploads never rebuild the website.
 - Moderate from [`admin.html`](admin.html) (no link from the site, open the URL directly):
   it lists every idea with a Remove button, and keeps a "removed" list you can restore from.
   Removing closes the issue, which takes it off the wall; nothing is destroyed.
