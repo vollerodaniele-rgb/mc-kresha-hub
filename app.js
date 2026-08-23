@@ -4,8 +4,8 @@
    values. Everything else works automatically.
    ------------------------------------------------------------ */
 const CONFIG = {
-  owner: "",            // your GitHub username, e.g. "erblin"
-  repo: "",             // the repo name, e.g. "mc-kresha-hub"
+  owner: "vollerodaniele-rgb",
+  repo: "mc-kresha-hub",
   ideaLabel: "idea"     // ideas are GitHub issues with this label
 };
 
