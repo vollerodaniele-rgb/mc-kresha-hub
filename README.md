@@ -1,57 +1,24 @@
-# MC KRESHA | Project HQ
+# MC KRESHA | Idea Box
 
-A cinematic project hub for MC Kresha: roadmap, current work, and a public Idea Box.
-Pure static site, hosted free on GitHub Pages. No backend, no build step.
+A single-page idea box for the MC Kresha project. Anyone can drop an idea straight
+on the page, no account needed. Static site on GitHub Pages, no build step.
+
+Live: https://vollerodaniele-rgb.github.io/mc-kresha-hub/
 
 ## How it works
 
-- **Roadmap and "Now Playing"** come from [`data/roadmap.json`](data/roadmap.json). Edit that one file (right on github.com if you like) and the site updates.
-- **Idea Box** runs on GitHub Issues. Visitors click "Drop an idea", fill a short form, and it becomes an issue labeled `idea`. The site fetches all `idea` issues from the GitHub API and shows them as cards, with 👍 reactions counted as votes.
-- Anyone with a free GitHub account can submit. You moderate by closing issues you do not want shown (only open issues are displayed).
-- **No-login submissions**: with the optional relay in [`cloudflare-worker/`](cloudflare-worker/README.md) set up, fans get a form right on the page and never need a GitHub account. Set `CONFIG.submitUrl` in `app.js` to turn it on.
+- The form posts to a Cloudflare Worker relay (source in [`cloudflare-worker/`](cloudflare-worker/README.md)),
+  which files each idea as a GitHub issue labeled `idea`.
+- The wall reads open `idea` issues back from the public GitHub API.
+- 👍 reactions on an issue count as votes; the "vote" link on a card opens the issue.
+- Moderate by closing an issue: it disappears from the wall.
 
-## Publish on GitHub Pages (one time, ~3 minutes)
+## Style
 
-1. Create a new repository on GitHub (for example `mc-kresha-hub`) and push this folder to it.
-2. Open `app.js` and fill in the two values at the top:
-   ```js
-   const CONFIG = {
-     owner: "YOUR_GITHUB_USERNAME",
-     repo: "mc-kresha-hub",
-     ideaLabel: "idea"
-   };
-   ```
-   Commit the change.
-3. In the repo on github.com: **Settings > Pages > Source: Deploy from a branch**, pick `main` and `/ (root)`, save.
-4. In the repo: **Issues > Labels > New label**, create a label named `idea` (any color).
-5. Your site goes live at `https://YOUR_USERNAME.github.io/mc-kresha-hub/`.
+House style: pitch black background, plain white text, no colors, no shadows,
+Playfair Display headings with Inter body text. Do not add accent colors.
 
-## Updating the roadmap
+## Editing text
 
-Edit `data/roadmap.json`. Each phase looks like:
-
-```json
-{
-  "title": "Act II: The Studio",
-  "status": "active",
-  "when": "Autumn 2026",
-  "description": "One line about this phase.",
-  "items": ["Task one", "Task two"]
-}
-```
-
-`status` is one of `done`, `active`, `planned`. The `now` array at the bottom fills the "Now Playing" section. The site also shows an "Edit roadmap" button (visible once CONFIG is set) that jumps straight to the GitHub editor for this file.
-
-## Moderating ideas
-
-- Close an issue to remove it from the site.
-- Pin or comment on the ones you love.
-- The `data/ideas.json` file is only a local sample used before CONFIG is filled in; once the repo is configured, real GitHub issues are shown instead.
-
-## Local preview
-
-Any static server works, for example:
-
-```bash
-npx serve .
-```
+The headline and intro paragraph live directly in [`index.html`](index.html).
+Settings (repo, label, relay URL) are in the `CONFIG` block at the top of [`app.js`](app.js).

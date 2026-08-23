@@ -1,102 +1,34 @@
-/* MC KRESHA Project HQ
+/* MC KRESHA Idea Box
    ------------------------------------------------------------
-   SETUP: after you create the GitHub repo, fill in these two
-   values. Everything else works automatically.
+   Ideas are GitHub issues labeled "idea". Visitors submit through
+   the form, which posts to the relay worker; the relay files the
+   issue. No account needed on the visitor's side.
    ------------------------------------------------------------ */
 const CONFIG = {
   owner: "vollerodaniele-rgb",
   repo: "mc-kresha-hub",
-  ideaLabel: "idea",    // ideas are GitHub issues with this label
-
-  // No-login submissions: paste your Cloudflare Worker URL here
-  // (see cloudflare-worker/README.md). Leave "" to fall back to
-  // the GitHub issue form.
-  submitUrl: "https://kresha-idea-box.vollerodaniele.workers.dev"
+  ideaLabel: "idea",
+  submitUrl: "https://kresha-idea-box.vollerodaniele.workers.dev",
+  site: "kresha"
 };
 
 const $ = (id) => document.getElementById(id);
 
 document.addEventListener("DOMContentLoaded", () => {
-  $("year").textContent = new Date().getFullYear();
-  loadRoadmap();
   loadIdeas();
-  wireLinks();
+  if (CONFIG.submitUrl) setupForm();
 });
 
-/* ============ ROADMAP (from data/roadmap.json) ============ */
-
-async function loadRoadmap() {
-  try {
-    const res = await fetch("data/roadmap.json", { cache: "no-store" });
-    const data = await res.json();
-
-    $("project-tagline").textContent = data.tagline || "";
-
-    const timeline = $("timeline");
-    timeline.innerHTML = "";
-    for (const phase of data.phases || []) {
-      const li = document.createElement("li");
-      li.className = "status-" + (phase.status || "planned");
-
-      const badgeClass =
-        phase.status === "done" ? "done" :
-        phase.status === "active" ? "active" : "";
-      const badgeText =
-        phase.status === "done" ? "Done" :
-        phase.status === "active" ? "In progress" : "Planned";
-
-      li.innerHTML = `
-        <div class="phase-top">
-          <span class="phase-title">${esc(phase.title)}</span>
-          <span class="badge ${badgeClass}">${badgeText}</span>
-          ${phase.when ? `<span class="phase-when">${esc(phase.when)}</span>` : ""}
-        </div>
-        ${phase.description ? `<p class="phase-desc">${esc(phase.description)}</p>` : ""}
-        ${(phase.items && phase.items.length)
-          ? `<ul class="phase-items">${phase.items.map((i) => `<li>${esc(i)}</li>`).join("")}</ul>`
-          : ""}
-      `;
-      timeline.appendChild(li);
-    }
-
-    const nowList = $("now-list");
-    nowList.innerHTML = "";
-    for (const item of data.now || []) {
-      const li = document.createElement("li");
-      li.textContent = item;
-      nowList.appendChild(li);
-    }
-  } catch (err) {
-    $("project-tagline").textContent = "Could not load roadmap data.";
-    console.error("roadmap load failed:", err);
-  }
-}
-
-/* ============ IDEA BOX (GitHub issues) ============ */
+/* ============ THE WALL ============ */
 
 async function loadIdeas() {
   const grid = $("idea-grid");
   const status = $("idea-status");
 
-  if (!CONFIG.owner || !CONFIG.repo) {
-    // repo not configured yet: show the local sample ideas so the
-    // page still looks alive during development
-    try {
-      const res = await fetch("data/ideas.json", { cache: "no-store" });
-      const ideas = await res.json();
-      renderIdeas(grid, ideas);
-    } catch {
-      status.textContent = "No ideas yet. Be the first!";
-    }
-    return;
-  }
-
   try {
     const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/issues` +
-      `?labels=${encodeURIComponent(CONFIG.ideaLabel)}&state=open&sort=created&direction=desc&per_page=30`;
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.github+json" }
-    });
+      `?labels=${encodeURIComponent(CONFIG.ideaLabel)}&state=open&sort=created&direction=desc&per_page=50`;
+    const res = await fetch(url, { headers: { Accept: "application/vnd.github+json" } });
     if (!res.ok) throw new Error("GitHub API " + res.status);
     const issues = await res.json();
 
@@ -105,16 +37,14 @@ async function loadIdeas() {
       .map((i) => {
         let body = i.body || "";
         let author = i.user ? i.user.login : "anonymous";
-        // ideas sent through the no-login form carry the fan's name
-        // in a trailer line; show that instead of the relay account
+        // ideas sent through the form carry the fan's name in a trailer
         const m = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via the idea box\)\s*$/);
         if (m) {
           author = m[1];
           body = body.slice(0, m.index);
         }
         return {
-          title: i.title,
-          body,
+          text: clean(body) || i.title.replace(/^Idea:\s*/, ""),
           author,
           votes: i.reactions ? i.reactions["+1"] : 0,
           url: i.html_url
@@ -125,69 +55,36 @@ async function loadIdeas() {
       status.textContent = "No ideas yet. Be the first!";
       return;
     }
-    renderIdeas(grid, ideas);
+
+    grid.innerHTML = "";
+    for (const idea of ideas) grid.appendChild(card(idea));
   } catch (err) {
-    status.textContent = "Could not reach GitHub right now. Try again in a minute.";
+    status.textContent = "Could not reach the idea wall right now. Try again in a minute.";
     console.error("ideas load failed:", err);
   }
 }
 
-function renderIdeas(grid, ideas) {
-  grid.innerHTML = "";
-  for (const idea of ideas) {
-    const card = document.createElement("article");
-    card.className = "idea-card";
-    card.innerHTML = `
-      <h3>${idea.url ? `<a href="${esc(idea.url)}" target="_blank" rel="noopener">${esc(idea.title)}</a>` : esc(idea.title)}</h3>
-      <p class="idea-body">${esc(stripMd(idea.body))}</p>
-      <div class="idea-meta">
-        <span>by ${esc(idea.author)}</span>
-        <span class="idea-votes">▲ ${idea.votes || 0}</span>
-      </div>
-    `;
-    grid.appendChild(card);
-  }
+function card({ text, author, votes, url }) {
+  const el = document.createElement("article");
+  el.className = "idea-card";
+  el.innerHTML = `
+    <p class="idea-body">${esc(text.slice(0, 300))}</p>
+    <div class="idea-meta">
+      <span>by ${esc(author)}</span>
+      <span>
+        <span class="idea-votes">▲ ${votes || 0}</span>
+        ${url ? ` · <a href="${esc(url)}" target="_blank" rel="noopener">vote</a>` : ""}
+      </span>
+    </div>
+  `;
+  return el;
 }
 
-/* ============ LINKS ============ */
+/* ============ FORM ============ */
 
-function wireLinks() {
-  const addIdea = $("add-idea");
-  const editRoadmap = $("edit-roadmap");
-
-  if (CONFIG.owner && CONFIG.repo) {
-    const base = `https://github.com/${CONFIG.owner}/${CONFIG.repo}`;
-    addIdea.href = `${base}/issues/new?labels=${encodeURIComponent(CONFIG.ideaLabel)}` +
-      `&template=idea.yml&title=${encodeURIComponent("Idea: ")}`;
-    editRoadmap.href = `${base}/edit/main/data/roadmap.json`;
-    editRoadmap.hidden = false;
-  } else {
-    addIdea.href = "#";
-    addIdea.addEventListener("click", (e) => {
-      e.preventDefault();
-      alert("Almost there! Fill in CONFIG.owner and CONFIG.repo at the top of app.js once the GitHub repo exists.");
-    });
-  }
-
-  if (CONFIG.submitUrl) {
-    setupIdeaForm(addIdea);
-  }
-}
-
-/* ============ NO-LOGIN SUBMISSION FORM ============ */
-
-function setupIdeaForm(addIdea) {
+function setupForm() {
   const form = $("idea-form");
   form.hidden = false;
-
-  // the header button now scrolls to the form instead of GitHub
-  addIdea.href = "#idea-form";
-  addIdea.removeAttribute("target");
-  addIdea.addEventListener("click", (e) => {
-    e.preventDefault();
-    form.scrollIntoView({ behavior: "smooth", block: "center" });
-    $("idea-text").focus({ preventScroll: true });
-  });
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -198,45 +95,29 @@ function setupIdeaForm(addIdea) {
 
     if (idea.length < 10) {
       msg.textContent = "Give it a few more words (at least 10 characters).";
-      msg.className = "form-msg err";
       return;
     }
 
     btn.disabled = true;
     msg.textContent = "Sending...";
-    msg.className = "form-msg";
 
     try {
       const res = await fetch(CONFIG.submitUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idea, name, website: $("idea-website").value })
+        body: JSON.stringify({ site: CONFIG.site, idea, name, website: $("idea-website").value })
       });
       if (!res.ok) throw new Error("relay " + res.status);
 
-      msg.textContent = "Got it! Your idea is in the box.";
-      msg.className = "form-msg ok";
+      msg.textContent = "Got it! Your idea is on the wall.";
       form.reset();
 
-      // show it immediately at the top of the grid
-      const grid = $("idea-grid");
       const status = $("idea-status");
       if (status) status.remove();
-      const card = document.createElement("article");
-      card.className = "idea-card";
-      card.innerHTML = `
-        <h3>${esc("Idea: " + idea.slice(0, 60))}</h3>
-        <p class="idea-body">${esc(idea.slice(0, 220))}</p>
-        <div class="idea-meta">
-          <span>by ${esc(name || "anonymous")}</span>
-          <span class="idea-votes">▲ 0</span>
-        </div>
-      `;
-      grid.prepend(card);
+      $("idea-grid").prepend(card({ text: idea, author: name || "anonymous", votes: 0, url: null }));
     } catch (err) {
       console.error("idea submit failed:", err);
       msg.textContent = "Could not send right now. Try again in a minute.";
-      msg.className = "form-msg err";
     } finally {
       btn.disabled = false;
     }
@@ -251,12 +132,10 @@ function esc(s) {
   return div.innerHTML;
 }
 
-// keep idea previews readable: drop common markdown noise
-function stripMd(s) {
+function clean(s) {
   return String(s)
     .replace(/```[\s\S]*?```/g, " ")
     .replace(/[#>*_`~\[\]()]/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 220);
+    .trim();
 }

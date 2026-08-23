@@ -3,81 +3,45 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>MC KRESHA | Project HQ</title>
-  <meta name="description" content="Official project hub for MC Kresha. Roadmap, updates and the fan idea box.">
+  <title>MC KRESHA | Idea Box</title>
+  <meta name="description" content="Drop your idea for the MC Kresha project. Open to everyone, no account needed.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎬</text></svg>">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💡</text></svg>">
 </head>
 <body>
-  <div class="grain" aria-hidden="true"></div>
 
   <header class="hero">
-    <p class="hero-kicker">A CINEMATIC PROJECT BY</p>
-    <h1 class="hero-title">MC&nbsp;KRESHA</h1>
-    <p class="hero-sub" id="project-tagline">Loading project...</p>
-    <nav class="hero-nav">
-      <a href="#roadmap">Roadmap</a>
-      <a href="#now">Now Playing</a>
-      <a href="#ideas">Idea Box</a>
-    </nav>
+    <p class="hero-kicker">MC KRESHA</p>
+    <h1 class="hero-title">Idea Box</h1>
+    <p class="hero-sub">
+      Pitch a video concept, a feature, a sample, a city for the tour.
+      Open to everyone, no account needed. The best ideas make it into the project.
+    </p>
   </header>
 
   <main>
-    <!-- ============ ROADMAP ============ -->
-    <section id="roadmap" class="section">
-      <div class="section-head">
-        <h2>Roadmap</h2>
-        <a class="edit-link" id="edit-roadmap" href="#" target="_blank" rel="noopener" hidden>Edit roadmap</a>
-      </div>
-      <p class="section-lede">Every scene of the project, from first draft to final cut.</p>
-      <ol class="timeline" id="timeline">
-        <!-- filled by app.js from data/roadmap.json -->
-      </ol>
-    </section>
-
-    <!-- ============ NOW ============ -->
-    <section id="now" class="section">
-      <div class="section-head">
-        <h2>Now Playing</h2>
-      </div>
-      <p class="section-lede">What is on the desk right now.</p>
-      <ul class="now-list" id="now-list">
-        <!-- filled by app.js from data/roadmap.json "now" entries -->
-      </ul>
-    </section>
-
-    <!-- ============ IDEA BOX ============ -->
-    <section id="ideas" class="section">
-      <div class="section-head">
-        <h2>Idea Box</h2>
-        <a class="btn-gold" id="add-idea" href="#" target="_blank" rel="noopener">+ Drop an idea</a>
-      </div>
-      <p class="section-lede">
-        Open to everyone, no account needed. Pitch a video concept, a feature, a sample,
-        a city for the tour. The best ideas make it into the film.
-      </p>
-
+    <section class="section">
       <form id="idea-form" class="idea-form" hidden>
         <label class="field">
           <span>Your idea</span>
           <textarea id="idea-text" rows="4" maxlength="1000" required
             placeholder="Paint the scene... example: a video shot entirely on VHS, one location, one night."></textarea>
         </label>
-        <div class="idea-form-row">
+        <div class="form-row">
           <label class="field">
             <span>Name or alias (optional)</span>
             <input id="idea-name" type="text" maxlength="60" placeholder="How should we credit you?">
           </label>
-          <button type="submit" class="btn-gold btn-submit" id="idea-submit">Send it</button>
+          <button type="submit" class="btn-send" id="idea-submit">Send it</button>
         </div>
-        <!-- honeypot field: humans never see it, bots fill it -->
         <input type="text" id="idea-website" name="website" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
         <p class="form-msg" id="form-msg" role="status"></p>
       </form>
 
+      <h2 class="wall-title">The Wall</h2>
       <div class="idea-grid" id="idea-grid">
         <p class="muted" id="idea-status">Loading ideas...</p>
       </div>
@@ -85,8 +49,8 @@
   </main>
 
   <footer class="footer">
-    <p>MC KRESHA · Project HQ · <span id="year"></span></p>
-    <p class="muted">Built on GitHub. Ideas live as GitHub issues, so nothing gets lost.</p>
+    <p>MC KRESHA</p>
+    <p class="muted">Every idea lands with the team. Nothing gets lost.</p>
   </footer>
 
   <script src="app.js"></script>
