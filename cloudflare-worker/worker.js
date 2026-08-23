@@ -9,12 +9,16 @@
                    write issues on the one repo below.
    ------------------------------------------------------------ */
 
-const REPO = "vollerodaniele-rgb/mc-kresha-hub";
+const SITES = {
+  kresha: { repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea" },
+  sakas: { repo: "vollerodaniele-rgb/sakas-portal", label: "idea" }
+};
+const DEFAULT_SITE = "kresha";
 const ALLOWED_ORIGINS = [
   "https://vollerodaniele-rgb.github.io",
-  "http://localhost:4173"
+  "http://localhost:4173",
+  "http://localhost:4174"
 ];
-const IDEA_LABEL = "idea";
 
 export default {
   async fetch(request, env) {
@@ -45,6 +49,8 @@ export default {
       return json({ ok: true }, 201, cors);
     }
 
+    const site = SITES[data.site] ? data.site : DEFAULT_SITE;
+    const { repo, label } = SITES[site];
     const idea = String(data.idea || "").trim();
     const name = String(data.name || "").trim().slice(0, 60);
 
@@ -58,7 +64,7 @@ export default {
       idea +
       "\n\n---\nSubmitted by: " + (name || "anonymous") + " (via the idea box)";
 
-    const gh = await fetch(`https://api.github.com/repos/${REPO}/issues`, {
+    const gh = await fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: "POST",
       headers: {
         "Authorization": "Bearer " + env.GITHUB_TOKEN,
@@ -66,7 +72,7 @@ export default {
         "User-Agent": "mc-kresha-idea-box",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ title, body, labels: [IDEA_LABEL] })
+      body: JSON.stringify({ title, body, labels: [label] })
     });
 
     if (!gh.ok) {
