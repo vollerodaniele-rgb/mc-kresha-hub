@@ -11,7 +11,7 @@ const CONFIG = {
   // No-login submissions: paste your Cloudflare Worker URL here
   // (see cloudflare-worker/README.md). Leave "" to fall back to
   // the GitHub issue form.
-  submitUrl: ""
+  submitUrl: "https://kresha-idea-box.vollerodaniele.workers.dev"
 };
 
 const $ = (id) => document.getElementById(id);
