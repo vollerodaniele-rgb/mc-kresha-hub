@@ -8,6 +8,7 @@ Pure static site, hosted free on GitHub Pages. No backend, no build step.
 - **Roadmap and "Now Playing"** come from [`data/roadmap.json`](data/roadmap.json). Edit that one file (right on github.com if you like) and the site updates.
 - **Idea Box** runs on GitHub Issues. Visitors click "Drop an idea", fill a short form, and it becomes an issue labeled `idea`. The site fetches all `idea` issues from the GitHub API and shows them as cards, with 👍 reactions counted as votes.
 - Anyone with a free GitHub account can submit. You moderate by closing issues you do not want shown (only open issues are displayed).
+- **No-login submissions**: with the optional relay in [`cloudflare-worker/`](cloudflare-worker/README.md) set up, fans get a form right on the page and never need a GitHub account. Set `CONFIG.submitUrl` in `app.js` to turn it on.
 
 ## Publish on GitHub Pages (one time, ~3 minutes)
 

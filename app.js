@@ -6,7 +6,12 @@
 const CONFIG = {
   owner: "vollerodaniele-rgb",
   repo: "mc-kresha-hub",
-  ideaLabel: "idea"     // ideas are GitHub issues with this label
+  ideaLabel: "idea",    // ideas are GitHub issues with this label
+
+  // No-login submissions: paste your Cloudflare Worker URL here
+  // (see cloudflare-worker/README.md). Leave "" to fall back to
+  // the GitHub issue form.
+  submitUrl: ""
 };
 
 const $ = (id) => document.getElementById(id);
@@ -97,13 +102,24 @@ async function loadIdeas() {
 
     const ideas = issues
       .filter((i) => !i.pull_request)
-      .map((i) => ({
-        title: i.title,
-        body: i.body || "",
-        author: i.user ? i.user.login : "anonymous",
-        votes: i.reactions ? i.reactions["+1"] : 0,
-        url: i.html_url
-      }));
+      .map((i) => {
+        let body = i.body || "";
+        let author = i.user ? i.user.login : "anonymous";
+        // ideas sent through the no-login form carry the fan's name
+        // in a trailer line; show that instead of the relay account
+        const m = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via the idea box\)\s*$/);
+        if (m) {
+          author = m[1];
+          body = body.slice(0, m.index);
+        }
+        return {
+          title: i.title,
+          body,
+          author,
+          votes: i.reactions ? i.reactions["+1"] : 0,
+          url: i.html_url
+        };
+      });
 
     if (!ideas.length) {
       status.textContent = "No ideas yet. Be the first!";
@@ -152,6 +168,79 @@ function wireLinks() {
       alert("Almost there! Fill in CONFIG.owner and CONFIG.repo at the top of app.js once the GitHub repo exists.");
     });
   }
+
+  if (CONFIG.submitUrl) {
+    setupIdeaForm(addIdea);
+  }
+}
+
+/* ============ NO-LOGIN SUBMISSION FORM ============ */
+
+function setupIdeaForm(addIdea) {
+  const form = $("idea-form");
+  form.hidden = false;
+
+  // the header button now scrolls to the form instead of GitHub
+  addIdea.href = "#idea-form";
+  addIdea.removeAttribute("target");
+  addIdea.addEventListener("click", (e) => {
+    e.preventDefault();
+    form.scrollIntoView({ behavior: "smooth", block: "center" });
+    $("idea-text").focus({ preventScroll: true });
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = $("form-msg");
+    const btn = $("idea-submit");
+    const idea = $("idea-text").value.trim();
+    const name = $("idea-name").value.trim();
+
+    if (idea.length < 10) {
+      msg.textContent = "Give it a few more words (at least 10 characters).";
+      msg.className = "form-msg err";
+      return;
+    }
+
+    btn.disabled = true;
+    msg.textContent = "Sending...";
+    msg.className = "form-msg";
+
+    try {
+      const res = await fetch(CONFIG.submitUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idea, name, website: $("idea-website").value })
+      });
+      if (!res.ok) throw new Error("relay " + res.status);
+
+      msg.textContent = "Got it! Your idea is in the box.";
+      msg.className = "form-msg ok";
+      form.reset();
+
+      // show it immediately at the top of the grid
+      const grid = $("idea-grid");
+      const status = $("idea-status");
+      if (status) status.remove();
+      const card = document.createElement("article");
+      card.className = "idea-card";
+      card.innerHTML = `
+        <h3>${esc("Idea: " + idea.slice(0, 60))}</h3>
+        <p class="idea-body">${esc(idea.slice(0, 220))}</p>
+        <div class="idea-meta">
+          <span>by ${esc(name || "anonymous")}</span>
+          <span class="idea-votes">▲ 0</span>
+        </div>
+      `;
+      grid.prepend(card);
+    } catch (err) {
+      console.error("idea submit failed:", err);
+      msg.textContent = "Could not send right now. Try again in a minute.";
+      msg.className = "form-msg err";
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 
 /* ============ HELPERS ============ */

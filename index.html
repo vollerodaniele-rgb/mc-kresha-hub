@@ -56,9 +56,28 @@
         <a class="btn-gold" id="add-idea" href="#" target="_blank" rel="noopener">+ Drop an idea</a>
       </div>
       <p class="section-lede">
-        Open to everyone. Pitch a video concept, a feature, a sample, a city for the tour.
-        The best ideas make it into the film.
+        Open to everyone, no account needed. Pitch a video concept, a feature, a sample,
+        a city for the tour. The best ideas make it into the film.
       </p>
+
+      <form id="idea-form" class="idea-form" hidden>
+        <label class="field">
+          <span>Your idea</span>
+          <textarea id="idea-text" rows="4" maxlength="1000" required
+            placeholder="Paint the scene... example: a video shot entirely on VHS, one location, one night."></textarea>
+        </label>
+        <div class="idea-form-row">
+          <label class="field">
+            <span>Name or alias (optional)</span>
+            <input id="idea-name" type="text" maxlength="60" placeholder="How should we credit you?">
+          </label>
+          <button type="submit" class="btn-gold btn-submit" id="idea-submit">Send it</button>
+        </div>
+        <!-- honeypot field: humans never see it, bots fill it -->
+        <input type="text" id="idea-website" name="website" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+        <p class="form-msg" id="form-msg" role="status"></p>
+      </form>
+
       <div class="idea-grid" id="idea-grid">
         <p class="muted" id="idea-status">Loading ideas...</p>
       </div>
