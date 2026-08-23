@@ -166,18 +166,9 @@ body {
 
 .idea-meta {
   margin-top: auto;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 0.8rem;
   font-size: 0.78rem;
   color: var(--dim);
 }
-
-.idea-votes { color: var(--text); font-weight: 600; }
-
-.idea-meta a { color: var(--dim); text-decoration: none; border-bottom: 1px solid var(--line-soft); }
-.idea-meta a:hover { color: var(--text); border-color: var(--text); }
 
 /* ============ FOOTER ============ */
 .footer {

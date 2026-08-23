@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MC KRESHA | Idea Box Admin</title>
+  <meta name="robots" content="noindex">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎛️</text></svg>">
+  <style>
+    .admin-wrap { max-width: 48rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+    .admin-title { font-family: var(--font-display); font-size: 2.2rem; font-weight: 700; }
+    .admin-sub { color: var(--dim); margin: 0.4rem 0 2rem; }
+    a.back { color: var(--dim); font-size: 0.85rem; text-decoration: none; }
+    a.back:hover { color: var(--text); }
+
+    .panel {
+      border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 1.4rem 1.5rem; margin-bottom: 1.6rem;
+    }
+    .panel h2 {
+      font-family: var(--font-display); font-size: 1.3rem; font-weight: 600;
+      margin-bottom: 0.9rem;
+    }
+    .row { display: flex; gap: 0.8rem; flex-wrap: wrap; align-items: flex-end; }
+
+    .toolbar {
+      display: flex; align-items: center; gap: 0.9rem;
+      flex-wrap: wrap; margin-bottom: 1.2rem;
+    }
+    .toolbar .count { font-size: 0.85rem; color: var(--dim); margin-right: auto; }
+
+    .btn-mini {
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+      background: none; border: 1px solid var(--line); color: var(--dim);
+      border-radius: 999px; padding: 0.35rem 0.95rem; cursor: pointer;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .btn-mini:hover { color: var(--text); border-color: var(--text); }
+    .btn-mini:disabled { opacity: 0.45; cursor: wait; }
+    .btn-mini.armed { color: var(--bg); background: var(--text); border-color: var(--text); }
+
+    .idea-row {
+      border: 1px solid var(--line); border-radius: var(--radius);
+      padding: 1.1rem 1.3rem; margin-bottom: 0.9rem;
+      display: flex; gap: 1.2rem; align-items: flex-start; flex-wrap: wrap;
+    }
+    .idea-row.removed { opacity: 0.5; }
+    .idea-row .text { flex: 1; min-width: 14rem; font-size: 0.94rem; }
+    .idea-row .meta {
+      margin-top: 0.45rem; font-size: 0.78rem; color: var(--dim);
+      display: flex; gap: 0.9rem; flex-wrap: wrap; align-items: center;
+    }
+    .idea-row .meta a { color: var(--dim); }
+    .idea-row .meta a:hover { color: var(--text); }
+    .idea-row .actions { display: flex; gap: 0.5rem; align-items: center; }
+
+    .section-label {
+      font-size: 0.72rem; font-weight: 600; letter-spacing: 0.14em;
+      text-transform: uppercase; color: var(--dim);
+      margin: 2.2rem 0 1rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="admin-wrap">
+    <a class="back" href="index.html">&larr; back to the idea box</a>
+    <h1 class="admin-title">Idea Box Admin</h1>
+    <p class="admin-sub">Remove ideas you do not want on the wall. Removing hides an idea from the site; you can always put it back.</p>
+
+    <div class="panel">
+      <h2>Access key</h2>
+      <p class="muted" style="margin-bottom:0.9rem; font-size:0.9rem">
+        Paste your GitHub token once (Issues: read and write on the mc-kresha-hub repo).
+        It is stored only in this browser, never on the site.
+      </p>
+      <div class="row">
+        <label class="field" style="flex:1; min-width:14rem"><span>Token</span>
+          <input id="token-input" type="password" placeholder="github_pat_...">
+        </label>
+        <button class="btn-mini" id="token-save">Save key</button>
+        <button class="btn-mini" id="token-clear">Forget key</button>
+      </div>
+      <p class="form-msg" id="token-msg" style="margin-top:0.7rem"></p>
+    </div>
+
+    <div class="toolbar">
+      <span class="count" id="count">Loading...</span>
+      <button class="btn-mini" id="refresh">Refresh</button>
+      <button class="btn-mini" id="toggle-removed">Show removed</button>
+    </div>
+
+    <p class="form-msg" id="action-msg"></p>
+
+    <div id="live-list"></div>
+
+    <div id="removed-wrap" hidden>
+      <p class="section-label">Removed ideas</p>
+      <div id="removed-list"></div>
+    </div>
+  </div>
+  <script src="admin.js"></script>
+</body>
+</html>

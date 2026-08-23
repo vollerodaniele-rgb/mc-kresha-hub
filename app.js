@@ -48,9 +48,7 @@ async function loadIdeas() {
         }
         return {
           text: clean(body) || i.title.replace(/^Idea:\s*/, ""),
-          author,
-          votes: i.reactions ? i.reactions["+1"] : 0,
-          url: i.html_url
+          author
         };
       });
 
@@ -67,18 +65,12 @@ async function loadIdeas() {
   }
 }
 
-function card({ text, author, votes, url }) {
+function card({ text, author }) {
   const el = document.createElement("article");
   el.className = "idea-card";
   el.innerHTML = `
     <p class="idea-body">${esc(text.slice(0, 300))}</p>
-    <div class="idea-meta">
-      <span>by ${esc(author)}</span>
-      <span>
-        <span class="idea-votes">▲ ${votes || 0}</span>
-        ${url ? ` · <a href="${esc(url)}" target="_blank" rel="noopener">vote</a>` : ""}
-      </span>
-    </div>
+    <div class="idea-meta"><span>by ${esc(author)}</span></div>
   `;
   return el;
 }
@@ -117,7 +109,7 @@ function setupForm() {
 
       const status = $("idea-status");
       if (status) status.remove();
-      $("idea-grid").prepend(card({ text: idea, author: name || "anonymous", votes: 0, url: null }));
+      $("idea-grid").prepend(card({ text: idea, author: name || "anonymous" }));
     } catch (err) {
       console.error("idea submit failed:", err);
       msg.textContent = "Could not send right now. Try again in a minute.";

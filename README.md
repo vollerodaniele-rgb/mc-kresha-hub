@@ -10,8 +10,11 @@ Live: https://vollerodaniele-rgb.github.io/mc-kresha-hub/
 - The form posts to a Cloudflare Worker relay (source in [`cloudflare-worker/`](cloudflare-worker/README.md)),
   which files each idea as a GitHub issue labeled `idea`.
 - The wall reads open `idea` issues back from the public GitHub API.
-- 👍 reactions on an issue count as votes; the "vote" link on a card opens the issue.
-- Moderate by closing an issue: it disappears from the wall.
+- Moderate from [`admin.html`](admin.html) (no link from the site, open the URL directly):
+  it lists every idea with a Remove button, and keeps a "removed" list you can restore from.
+  Removing closes the issue, which takes it off the wall; nothing is destroyed.
+  Needs a fine-grained token with **Issues: read and write** on this repo, pasted once
+  into the page (stored in that browser only).
 
 ## Style
 
