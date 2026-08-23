@@ -26,39 +26,13 @@ async function loadIdeas() {
   const status = $("idea-status");
 
   try {
-    const url = `https://api.github.com/repos/${CONFIG.owner}/${CONFIG.repo}/issues` +
-      `?labels=${encodeURIComponent(CONFIG.ideaLabel)}&state=open&sort=created&direction=desc&per_page=50`;
-    const res = await fetch(url, {
-      headers: { Accept: "application/vnd.github+json" },
+    // read through the relay: it is authenticated, so visitors never
+    // run into GitHub's limit for anonymous requests
+    const res = await fetch(`${CONFIG.submitUrl}/ideas?site=${encodeURIComponent(CONFIG.site)}`, {
       cache: "no-store"
     });
-    if (!res.ok) throw new Error("GitHub API " + res.status);
-    const issues = await res.json();
-
-    const ideas = issues
-      .filter((i) => !i.pull_request)
-      .map((i) => {
-        let body = i.body || "";
-        let author = i.user ? i.user.login : "anonymous";
-        // ideas sent through the form carry the fan's name in a trailer
-        const m = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via the idea box\)\s*$/);
-        if (m) {
-          author = m[1];
-          body = body.slice(0, m.index);
-        }
-        // and an attached picture as a markdown image
-        let image = "";
-        const img = body.match(/!\[[^\]]*\]\((https:\/\/[^\s)]+)\)/);
-        if (img) {
-          image = img[1];
-          body = body.replace(img[0], "");
-        }
-        return {
-          text: clean(body) || i.title.replace(/^Idea:\s*/, ""),
-          author,
-          image
-        };
-      });
+    if (!res.ok) throw new Error("relay " + res.status);
+    const { ideas } = await res.json();
 
     if (!ideas.length) {
       status.textContent = "No ideas yet. Be the first!";
@@ -206,10 +180,3 @@ function esc(s) {
   return div.innerHTML;
 }
 
-function clean(s) {
-  return String(s)
-    .replace(/```[\s\S]*?```/g, " ")
-    .replace(/[#>*_`~\[\]()]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
-}

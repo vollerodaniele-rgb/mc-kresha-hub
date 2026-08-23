@@ -36,8 +36,17 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
     }
+
+    // Reading the wall goes through here too. Anonymous browsers only
+    // get 60 GitHub calls an hour per address, which a shared office or
+    // mobile network burns through quickly; the token we hold is good
+    // for 5000, so the visitor never sees a rate limit.
+    if (request.method === "GET") {
+      return listIdeas(new URL(request.url), env, cors);
+    }
+
     if (request.method !== "POST") {
-      return json({ error: "POST only" }, 405, cors);
+      return json({ error: "POST or GET only" }, 405, cors);
     }
 
     let data;
@@ -96,6 +105,58 @@ export default {
     return json({ ok: true }, 201, cors);
   }
 };
+
+/* Reads the open ideas for one site and returns them ready to render.
+   The GitHub call is cached briefly at the edge, so a burst of visitors
+   costs one request rather than hundreds. */
+async function listIdeas(url, env, cors) {
+  const asked = url.searchParams.get("site");
+  const site = SITES[asked] ? asked : DEFAULT_SITE;
+  const { repo, label } = SITES[site];
+
+  const api = `https://api.github.com/repos/${repo}/issues` +
+    `?labels=${encodeURIComponent(label)}&state=open&sort=created&direction=desc&per_page=50`;
+
+  const res = await fetch(api, {
+    headers: {
+      "Authorization": "Bearer " + env.GITHUB_TOKEN,
+      "Accept": "application/vnd.github+json",
+      "User-Agent": "mc-kresha-idea-box"
+    },
+    cf: { cacheTtl: 30, cacheEverything: true }
+  });
+
+  if (!res.ok) {
+    return json({ error: "could not read ideas (github " + res.status + ")" }, 502, cors);
+  }
+
+  const issues = await res.json();
+  const ideas = issues.filter((i) => !i.pull_request).map((i) => {
+    let body = i.body || "";
+    let author = i.user ? i.user.login : "anonymous";
+
+    const trailer = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via the idea box\)\s*$/);
+    if (trailer) {
+      author = trailer[1];
+      body = body.slice(0, trailer.index);
+    }
+
+    let image = "";
+    const img = body.match(/!\[[^\]]*\]\((https:\/\/[^\s)]+)\)/);
+    if (img) {
+      image = img[1];
+      body = body.replace(img[0], "");
+    }
+
+    return {
+      text: body.trim() || i.title.replace(/^Idea:\s*/, ""),
+      author,
+      image
+    };
+  });
+
+  return json({ ideas }, 200, { ...cors, "Cache-Control": "public, max-age=30" });
+}
 
 /* Pictures live on a separate "uploads" branch so that adding one
    does not rebuild the website. They are served straight from
