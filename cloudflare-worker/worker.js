@@ -16,6 +16,8 @@ const SITES = {
 const DEFAULT_SITE = "kresha";
 const ALLOWED_ORIGINS = [
   "https://vollerodaniele-rgb.github.io",
+  "https://sakas.noiraunoir.com",
+  "https://kresha.noiraunoir.com",
   "http://localhost:4173",
   "http://localhost:4174"
 ];
