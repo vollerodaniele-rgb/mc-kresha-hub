@@ -16,6 +16,12 @@ const SITES = {
 const DEFAULT_SITE = "kresha";
 const UPLOAD_BRANCH = "uploads";
 const MAX_IMAGE_B64 = 3000000; // base64 chars, roughly 2.2 MB of image
+const MAX_AUDIO_B64 = 3000000; // a minute of speech is far below this
+const AUDIO_TYPES = {
+  "audio/webm": "webm",
+  "audio/mp4": "m4a",
+  "audio/ogg": "ogg"
+};
 const ALLOWED_ORIGINS = [
   "https://vollerodaniele-rgb.github.io",
   "https://sakas.noiraunoir.com",
@@ -41,8 +47,12 @@ export default {
     // get 60 GitHub calls an hour per address, which a shared office or
     // mobile network burns through quickly; the token we hold is good
     // for 5000, so the visitor never sees a rate limit.
-    if (request.method === "GET") {
-      return listIdeas(new URL(request.url), env, cors);
+    if (request.method === "GET" || request.method === "HEAD") {
+      const url = new URL(request.url);
+      // GitHub serves uploaded audio as text/plain with sniffing off,
+      // so browsers refuse to play it. We hand it back properly typed.
+      if (url.pathname === "/audio") return serveAudio(url, env);
+      return listIdeas(url, env, cors);
     }
 
     if (request.method !== "POST") {
@@ -66,9 +76,15 @@ export default {
     const { repo, label } = SITES[site];
     const idea = String(data.idea || "").trim();
     const name = String(data.name || "").trim().slice(0, 60);
+    const hasVoice = !!(data.audio && data.audio.data);
 
-    if (idea.length < 10 || idea.length > 1000) {
-      return json({ error: "idea must be between 10 and 1000 characters" }, 400, cors);
+    // a voice note can stand on its own, so text is only required
+    // when nothing was recorded
+    if (idea.length > 1000) {
+      return json({ error: "idea must be under 1000 characters" }, 400, cors);
+    }
+    if (idea.length < 10 && !hasVoice) {
+      return json({ error: "idea must be at least 10 characters" }, 400, cors);
     }
 
     const ghHeaders = {
@@ -85,11 +101,19 @@ export default {
       imageUrl = await uploadImage(data.image, repo, ghHeaders);
     }
 
+    let audioUrl = "";
+    if (hasVoice) {
+      audioUrl = await uploadAudio(data.audio, repo, ghHeaders, new URL(request.url).origin);
+    }
+
     const oneLine = idea.replace(/\s+/g, " ");
-    const title = "Idea: " + oneLine.slice(0, 60) + (oneLine.length > 60 ? "..." : "");
+    const title = oneLine
+      ? "Idea: " + oneLine.slice(0, 60) + (oneLine.length > 60 ? "..." : "")
+      : "Idea: voice message";
     const body =
       idea +
       (imageUrl ? "\n\n![idea picture](" + imageUrl + ")" : "") +
+      (audioUrl ? "\n\n[voice message](" + audioUrl + ")" : "") +
       "\n\n---\nSubmitted by: " + (name || "anonymous") + " (via the idea box)";
 
     const gh = await fetch(`https://api.github.com/repos/${repo}/issues`, {
@@ -148,10 +172,18 @@ async function listIdeas(url, env, cors) {
       body = body.replace(img[0], "");
     }
 
+    let audio = "";
+    const voice = body.match(/\[voice message\]\((https:\/\/[^\s)]+)\)/);
+    if (voice) {
+      audio = voice[1];
+      body = body.replace(voice[0], "");
+    }
+
     return {
-      text: body.trim() || i.title.replace(/^Idea:\s*/, ""),
+      text: body.trim() || (audio ? "" : i.title.replace(/^Idea:\s*/, "")),
       author,
-      image
+      image,
+      audio
     };
   });
 
@@ -187,6 +219,69 @@ async function uploadImage(image, repo, ghHeaders) {
   }
 
   return `https://raw.githubusercontent.com/${repo}/${UPLOAD_BRANCH}/${path}`;
+}
+
+/* Voice notes: same storage as pictures, but played back through
+   this worker so the browser gets a real audio content type. */
+async function uploadAudio(audio, repo, ghHeaders, origin) {
+  const b64 = String(audio.data || "");
+  const ext = AUDIO_TYPES[audio.type];
+
+  if (!ext) return "";
+  if (!b64 || b64.length > MAX_AUDIO_B64) return "";
+  if (!/^[A-Za-z0-9+/=]+$/.test(b64)) return "";
+
+  const file = `${crypto.randomUUID()}.${ext}`;
+
+  const res = await fetch(`https://api.github.com/repos/${repo}/contents/uploads/${file}`, {
+    method: "PUT",
+    headers: ghHeaders,
+    body: JSON.stringify({
+      message: "Add voice message",
+      content: b64,
+      branch: UPLOAD_BRANCH
+    })
+  });
+
+  if (!res.ok) {
+    console.log("audio upload failed:", res.status, await res.text());
+    return "";
+  }
+
+  // repo is owner/name; the player needs to know which one to read from
+  return `${origin}/audio?repo=${encodeURIComponent(repo)}&f=${encodeURIComponent(file)}`;
+}
+
+async function serveAudio(url, env) {
+  const file = url.searchParams.get("f") || "";
+  const repo = url.searchParams.get("repo") || "";
+
+  if (!/^[0-9a-f-]{36}\.(webm|m4a|mp4|ogg)$/.test(file)) {
+    return new Response("bad file", { status: 400 });
+  }
+  if (!Object.values(SITES).some((s) => s.repo === repo)) {
+    return new Response("unknown repo", { status: 400 });
+  }
+
+  const raw = await fetch(
+    `https://raw.githubusercontent.com/${repo}/${UPLOAD_BRANCH}/uploads/${file}`,
+    { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN }, cf: { cacheTtl: 3600, cacheEverything: true } }
+  );
+
+  if (!raw.ok) return new Response("not found", { status: 404 });
+
+  const ext = file.split(".").pop();
+  const type = ext === "webm" ? "audio/webm"
+    : ext === "ogg" ? "audio/ogg"
+    : "audio/mp4";
+
+  return new Response(raw.body, {
+    headers: {
+      "Content-Type": type,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "Access-Control-Allow-Origin": "*"
+    }
+  });
 }
 
 function json(obj, status, cors) {

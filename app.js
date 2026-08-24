@@ -47,12 +47,13 @@ async function loadIdeas() {
   }
 }
 
-function card({ text, author, image }) {
+function card({ text, author, image, audio }) {
   const el = document.createElement("article");
   el.className = "idea-card";
   el.innerHTML = `
     ${image ? `<img class="idea-image" src="${esc(image)}" alt="" loading="lazy">` : ""}
-    <p class="idea-body">${esc(text.slice(0, 300))}</p>
+    ${text ? `<p class="idea-body">${esc(text.slice(0, 300))}</p>` : ""}
+    ${audio ? `<audio class="idea-audio" controls preload="none" src="${esc(audio)}"></audio>` : ""}
     <div class="idea-meta"><span>by ${esc(author)}</span></div>
   `;
   return el;
@@ -64,6 +65,7 @@ function setupForm() {
   const form = $("idea-form");
   form.hidden = false;
   setupPicker();
+  setupRecorder();
 
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -72,17 +74,19 @@ function setupForm() {
     const idea = $("idea-text").value.trim();
     const name = $("idea-name").value.trim();
 
-    if (idea.length < 10) {
-      msg.textContent = "Give it a few more words (at least 10 characters).";
+    // a voice message alone is a complete idea
+    if (idea.length < 10 && !pendingAudio) {
+      msg.textContent = "Give it a few more words, or record a voice message.";
       return;
     }
 
     btn.disabled = true;
-    msg.textContent = pendingImage ? "Sending picture..." : "Sending...";
+    msg.textContent = (pendingImage || pendingAudio) ? "Sending..." : "Sending...";
 
     try {
       const payload = { site: CONFIG.site, idea, name, website: $("idea-website").value };
       if (pendingImage) payload.image = { type: "image/jpeg", data: pendingImage };
+      if (pendingAudio) payload.audio = { type: pendingAudio.type, data: pendingAudio.data };
 
       const res = await fetch(CONFIG.submitUrl, {
         method: "POST",
@@ -93,12 +97,16 @@ function setupForm() {
 
       msg.textContent = "Got it! Your idea is on the wall.";
       const shownImage = pendingImage ? "data:image/jpeg;base64," + pendingImage : "";
+      const shownAudio = pendingAudio ? `data:${pendingAudio.type};base64,${pendingAudio.data}` : "";
       form.reset();
       clearPicture();
+      clearRecording();
 
       const status = $("idea-status");
       if (status) status.remove();
-      $("idea-grid").prepend(card({ text: idea, author: name || "anonymous", image: shownImage }));
+      $("idea-grid").prepend(card({
+        text: idea, author: name || "anonymous", image: shownImage, audio: shownAudio
+      }));
     } catch (err) {
       console.error("idea submit failed:", err);
       msg.textContent = "Could not send right now. Try again in a minute.";
@@ -170,6 +178,118 @@ async function shrink(file) {
     if (b64.length <= 2800000) return b64;
   }
   throw new Error("picture too large");
+}
+
+/* ============ VOICE MESSAGE ============ */
+
+// {type, data} of the recording waiting to be sent
+let pendingAudio = null;
+let recorder = null;
+let recTimer = null;
+const MAX_SECONDS = 60;
+
+function setupRecorder() {
+  // only offer it where the browser can actually record
+  const canRecord = typeof MediaRecorder !== "undefined" &&
+    navigator.mediaDevices && navigator.mediaDevices.getUserMedia;
+  if (!canRecord) return;
+
+  $("voice-field").hidden = false;
+  $("rec-start").addEventListener("click", startRecording);
+  $("rec-stop").addEventListener("click", stopRecording);
+  $("rec-clear").addEventListener("click", () => {
+    clearRecording();
+    $("form-msg").textContent = "";
+  });
+}
+
+function pickAudioType() {
+  for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]) {
+    if (MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
+async function startRecording() {
+  const msg = $("form-msg");
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = pickAudioType();
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined);
+
+    const chunks = [];
+    recorder.addEventListener("dataavailable", (e) => {
+      if (e.data.size) chunks.push(e.data);
+    });
+
+    recorder.addEventListener("stop", async () => {
+      stream.getTracks().forEach((t) => t.stop());
+      clearInterval(recTimer);
+      $("rec-start").hidden = false;
+      $("rec-stop").hidden = true;
+
+      const blob = new Blob(chunks, { type: chunks[0] ? chunks[0].type : "audio/webm" });
+      // the browser tags it with codec details the relay does not need
+      const type = blob.type.split(";")[0];
+      pendingAudio = { type, data: await blobToBase64(blob) };
+
+      $("rec-preview").src = URL.createObjectURL(blob);
+      $("rec-preview").hidden = false;
+      $("rec-clear").hidden = false;
+      $("rec-status").textContent = "Recorded " + formatTime(recordedSeconds);
+    });
+
+    recorder.start();
+    recordedSeconds = 0;
+    $("rec-start").hidden = true;
+    $("rec-stop").hidden = false;
+    $("rec-preview").hidden = true;
+    $("rec-status").textContent = "Recording 0:00";
+    msg.textContent = "";
+
+    recTimer = setInterval(() => {
+      recordedSeconds++;
+      $("rec-status").textContent = "Recording " + formatTime(recordedSeconds);
+      if (recordedSeconds >= MAX_SECONDS) stopRecording();
+    }, 1000);
+  } catch (err) {
+    console.error("recording failed:", err);
+    msg.textContent = err && err.name === "NotAllowedError"
+      ? "Microphone access was blocked. Allow it in your browser to record."
+      : "Could not start recording on this device.";
+  }
+}
+
+let recordedSeconds = 0;
+
+function stopRecording() {
+  if (recorder && recorder.state !== "inactive") recorder.stop();
+}
+
+function clearRecording() {
+  pendingAudio = null;
+  clearInterval(recTimer);
+  const preview = $("rec-preview");
+  if (preview.src.startsWith("blob:")) URL.revokeObjectURL(preview.src);
+  preview.hidden = true;
+  preview.removeAttribute("src");
+  $("rec-clear").hidden = true;
+  $("rec-start").hidden = false;
+  $("rec-stop").hidden = true;
+  $("rec-status").textContent = "Nothing recorded";
+}
+
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result).split(",")[1]);
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
+function formatTime(s) {
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
 
 /* ============ HELPERS ============ */

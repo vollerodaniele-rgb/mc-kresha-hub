@@ -12,7 +12,7 @@ Setup takes about 10 minutes, one time.
 2. Name: `idea-box-relay`. Expiration: pick 1 year (put a reminder to renew).
 3. Repository access: **Only select repositories** > choose `mc-kresha-hub`.
 4. Permissions > Repository permissions > **Issues: Read and write** AND
-   **Contents: Read and write** (the second one is what lets people attach pictures;
+   **Contents: Read and write** (the second one is what lets people attach pictures and voice messages;
    uploads go to the `uploads` branch, so the website is never rebuilt by an upload).
 5. Generate, and copy the token (starts with `github_pat_`). Keep it somewhere safe for step 3; treat it like a password.
 

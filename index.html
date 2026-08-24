@@ -31,6 +31,19 @@
           <textarea id="idea-text" rows="4" maxlength="1000" required
             placeholder="A street at 4am. An old jacket. A sound you can’t get out of your head. Start anywhere."></textarea>
         </label>
+        <div class="pic-field" id="voice-field" hidden>
+          <span class="pic-label">Voice message (optional)</span>
+          <div class="pic-row">
+            <button type="button" class="btn-file" id="rec-start">Record a voice message</button>
+            <button type="button" class="btn-file recording" id="rec-stop" hidden>
+              <span class="rec-dot"></span> Stop recording
+            </button>
+            <span class="pic-name muted" id="rec-status">Nothing recorded</span>
+            <button type="button" class="btn-clear" id="rec-clear" hidden>Remove recording</button>
+          </div>
+          <audio id="rec-preview" class="rec-preview" controls hidden></audio>
+        </div>
+
         <div class="pic-field">
           <span class="pic-label">Picture (optional)</span>
           <div class="pic-row">

@@ -89,10 +89,17 @@ async function fetchIdeas(state) {
       image = img[1];
       body = body.replace(img[0], "");
     }
+    let audio = "";
+    const voice = body.match(/\[voice message\]\((https:\/\/[^\s)]+)\)/);
+    if (voice) {
+      audio = voice[1];
+      body = body.replace(voice[0], "");
+    }
     return {
       number: i.number,
       image,
-      text: clean(body) || i.title.replace(/^Idea:\s*/, ""),
+      audio,
+      text: clean(body) || (audio ? "Voice message" : i.title.replace(/^Idea:\s*/, "")),
       author,
       date: new Date(i.created_at).toLocaleDateString("en-GB",
         { day: "numeric", month: "short", year: "numeric" }),
@@ -132,11 +139,22 @@ function renderList(wrap, ideas, isRemoved) {
     text.className = "text";
     const p = document.createElement("p");
     p.textContent = idea.text;
+    text.appendChild(p);
+
+    if (idea.audio) {
+      const player = document.createElement("audio");
+      player.className = "idea-audio";
+      player.controls = true;
+      player.preload = "none";
+      player.src = idea.audio;
+      text.appendChild(player);
+    }
+
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.innerHTML = `<span>by ${esc(idea.author)}</span><span>${esc(idea.date)}</span>` +
       `<a href="${esc(idea.url)}" target="_blank" rel="noopener">open on GitHub</a>`;
-    text.append(p, meta);
+    text.appendChild(meta);
 
     const actions = document.createElement("div");
     actions.className = "actions";

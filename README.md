@@ -10,6 +10,9 @@ Live: https://vollerodaniele-rgb.github.io/mc-kresha-hub/
 - The form posts to a Cloudflare Worker relay (source in [`cloudflare-worker/`](cloudflare-worker/README.md)),
   which files each idea as a GitHub issue labeled `idea`.
 - The wall reads open `idea` issues back from the public GitHub API.
+- A voice message can be recorded in the browser instead of (or alongside) typing.
+  It is stored on the `uploads` branch and played back **through the relay**: GitHub serves
+  audio as `text/plain` with sniffing disabled, so a direct raw link will not play.
 - A picture can be attached to an idea. The browser resizes it to 1600px and re-encodes
   it as JPEG (which also strips location data), the relay stores it on the `uploads`
   branch, and the issue body links to it. Uploads never rebuild the website.

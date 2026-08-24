@@ -13,6 +13,9 @@
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+/* an explicit display rule must never resurrect a hidden element */
+[hidden] { display: none !important; }
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -246,4 +249,35 @@ body {
   font-size: 1.05rem;
   color: var(--text);
   margin-bottom: 0.3rem;
+}
+
+/* ============ VOICE MESSAGE ============ */
+.btn-file.recording {
+  border-color: var(--text);
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.rec-dot {
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 50%;
+  background: var(--text);
+  animation: pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+
+.rec-preview {
+  width: 100%;
+  max-width: 22rem;
+  height: 2.5rem;
+  filter: invert(1) grayscale(1);
+}
+
+.idea-audio {
+  width: 100%;
+  height: 2.4rem;
+  filter: invert(1) grayscale(1);
 }
