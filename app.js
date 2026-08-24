@@ -203,6 +203,29 @@ function setupRecorder() {
   });
 }
 
+/* iPhones record through a "phone call" audio path that throws away
+   everything above roughly 4 kHz, which is why voice notes came out
+   muffled no matter how high the bitrate went. That path stays active
+   while ANY of these three processing features is on, so all three have
+   to be off to get the full range microphone. */
+async function openMicrophone() {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+  } catch (err) {
+    // some devices refuse to hand over an unprocessed microphone
+    if (err && (err.name === "OverconstrainedError" || err.name === "NotFoundError")) {
+      return navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    throw err;
+  }
+}
+
 function pickAudioType() {
   for (const t of ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"]) {
     if (MediaRecorder.isTypeSupported(t)) return t;
@@ -213,18 +236,7 @@ function pickAudioType() {
 async function startRecording() {
   const msg = $("form-msg");
   try {
-    // Phone browsers default to call-style processing, which guts anything
-    // that is not plain speech. Someone humming a melody should still sound
-    // like the melody, so we ask for the raw signal and keep only the gain
-    // control that stops quiet recordings.
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: true,
-        sampleRate: 48000
-      }
-    });
+    const stream = await openMicrophone();
 
     const mimeType = pickAudioType();
     // AAC (what iPhones produce) needs a lot more room than Opus to sound
