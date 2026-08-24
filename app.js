@@ -213,9 +213,24 @@ function pickAudioType() {
 async function startRecording() {
   const msg = $("form-msg");
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    // Phone browsers default to call-style processing, which guts anything
+    // that is not plain speech. Someone humming a melody should still sound
+    // like the melody, so we ask for the raw signal and keep only the gain
+    // control that stops quiet recordings.
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: true,
+        sampleRate: 48000
+      }
+    });
+
     const mimeType = pickAudioType();
-    recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: 32000 } : undefined);
+    // AAC (what iPhones produce) needs a lot more room than Opus to sound
+    // decent. Even the high end here fits a minute inside the upload cap.
+    const bitrate = mimeType.includes("mp4") || mimeType.includes("aac") ? 128000 : 64000;
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType, audioBitsPerSecond: bitrate } : undefined);
 
     const chunks = [];
     recorder.addEventListener("dataavailable", (e) => {
@@ -231,8 +246,15 @@ async function startRecording() {
       const blob = new Blob(chunks, { type: chunks[0] ? chunks[0].type : "audio/webm" });
       // the browser tags it with codec details the relay does not need
       const type = blob.type.split(";")[0];
-      pendingAudio = { type, data: await blobToBase64(blob) };
+      const data = await blobToBase64(blob);
 
+      if (data.length > 2900000) {
+        clearRecording();
+        $("form-msg").textContent = "That recording is too long to send. Try a shorter one.";
+        return;
+      }
+
+      pendingAudio = { type, data };
       $("rec-preview").src = URL.createObjectURL(blob);
       $("rec-preview").hidden = false;
       $("rec-clear").hidden = false;
