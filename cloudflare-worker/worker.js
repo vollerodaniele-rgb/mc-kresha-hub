@@ -11,7 +11,8 @@
 
 const SITES = {
   kresha: { repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea" },
-  sakas: { repo: "vollerodaniele-rgb/sakas-portal", label: "idea" }
+  sakas: { repo: "vollerodaniele-rgb/sakas-portal", label: "idea" },
+  sakasidea: { repo: "vollerodaniele-rgb/sakas-idea", label: "idea" }
 };
 const DEFAULT_SITE = "kresha";
 const UPLOAD_BRANCH = "uploads";
@@ -25,9 +26,11 @@ const AUDIO_TYPES = {
 const ALLOWED_ORIGINS = [
   "https://vollerodaniele-rgb.github.io",
   "https://sakas.noiraunoir.com",
+  "https://sakasidea.noiraunoir.com",
   "https://kresha.noiraunoir.com",
   "http://localhost:4173",
-  "http://localhost:4174"
+  "http://localhost:4174",
+  "http://localhost:4175"
 ];
 
 export default {
