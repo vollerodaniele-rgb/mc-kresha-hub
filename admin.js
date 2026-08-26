@@ -50,6 +50,7 @@ function wireTokenPanel() {
 
 async function loadAll() {
   $("count").textContent = "Loading...";
+  keyRejected = false;
   try {
     const [open, closed] = await Promise.all([fetchIdeas("open"), fetchIdeas("closed")]);
 
@@ -59,19 +60,46 @@ async function loadAll() {
     $("count").textContent =
       `${open.length} idea${open.length === 1 ? "" : "s"} on the wall` +
       (closed.length ? ` · ${closed.length} removed` : "");
+
+    $("action-msg").textContent = keyRejected
+      ? "GitHub refused the saved key, so this is read only for now. " +
+        "Paste a fresh key above to remove or restore ideas."
+      : "";
   } catch (err) {
     console.error("load failed:", err);
-    $("count").textContent = "Could not load ideas.";
+    $("count").textContent = "Could not load ideas (" + err.message + ").";
   }
 }
+
+// set when GitHub refuses the saved key, so the page can say so
+let keyRejected = false;
 
 async function fetchIdeas(state) {
   const url = `https://api.github.com/repos/${OWNER}/${REPO}/issues` +
     `?labels=${encodeURIComponent(LABEL)}&state=${state}&sort=created&direction=desc&per_page=100`;
-  const headers = { Accept: "application/vnd.github+json" };
-  if (token()) headers.Authorization = "Bearer " + token();
 
-  const res = await fetch(url, { headers, cache: "no-store" });
+  let res = null;
+
+  if (token()) {
+    res = await fetch(url, {
+      headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + token() },
+      cache: "no-store"
+    });
+    // a stale or revoked key should not hide the ideas: the repo is
+    // public, so fall back to reading without it and say what happened
+    if (res.status === 401 || res.status === 403) {
+      keyRejected = true;
+      res = null;
+    }
+  }
+
+  if (!res) {
+    res = await fetch(url, {
+      headers: { Accept: "application/vnd.github+json" },
+      cache: "no-store"
+    });
+  }
+
   if (!res.ok) throw new Error("GitHub API " + res.status);
   const issues = await res.json();
 
