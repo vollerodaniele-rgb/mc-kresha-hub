@@ -4,15 +4,26 @@
    the website form and files them as GitHub issues labeled
    "idea", so they appear on the site like any other idea.
 
-   Required secret (set in the Worker's settings, never in code):
-     GITHUB_TOKEN  a fine-grained GitHub token that can only
-                   write issues on the one repo below.
+   Secrets (set in the Worker's settings, never in code):
+     GITHUB_TOKEN        fine-grained GitHub token, issues and
+                         contents on the repos below
+     TELEGRAM_BOT_TOKEN  optional, to be pinged on every submission
+     TELEGRAM_CHAT_ID    optional, which chat to ping
    ------------------------------------------------------------ */
 
 const SITES = {
-  kresha: { repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea" },
-  sakas: { repo: "vollerodaniele-rgb/sakas-portal", label: "idea" },
-  sakasidea: { repo: "vollerodaniele-rgb/sakas-idea", label: "idea" }
+  kresha: {
+    repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea",
+    name: "idea on Last Chapter", url: "https://kresha.noiraunoir.com/admin.html"
+  },
+  sakas: {
+    repo: "vollerodaniele-rgb/sakas-portal", label: "idea",
+    name: "request from the Sakas portal", url: "https://sakas.noiraunoir.com/admin.html"
+  },
+  sakasidea: {
+    repo: "vollerodaniele-rgb/sakas-idea", label: "idea",
+    name: "idea in the Sakas idea box", url: "https://sakasidea.noiraunoir.com/admin.html"
+  }
 };
 const DEFAULT_SITE = "kresha";
 const UPLOAD_BRANCH = "uploads";
@@ -34,7 +45,7 @@ const ALLOWED_ORIGINS = [
 ];
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
     const cors = {
       "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
@@ -55,6 +66,7 @@ export default {
       // GitHub serves uploaded audio as text/plain with sniffing off,
       // so browsers refuse to play it. We hand it back properly typed.
       if (url.pathname === "/audio") return serveAudio(url, env);
+      if (url.pathname === "/telegram-setup") return telegramSetup(env, cors);
       return listIdeas(url, env, cors);
     }
 
@@ -128,6 +140,16 @@ export default {
     if (!gh.ok) {
       return json({ error: "could not save idea (github " + gh.status + ")" }, 502, cors);
     }
+
+    // ping Telegram after the reply is sent, so a slow or broken
+    // notification never keeps the sender waiting
+    ctx.waitUntil(notifyTelegram(env, {
+      site,
+      name,
+      idea,
+      hasImage: !!imageUrl,
+      hasVoice: !!audioUrl
+    }));
 
     return json({ ok: true }, 201, cors);
   }
@@ -285,6 +307,75 @@ async function serveAudio(url, env) {
       "Access-Control-Allow-Origin": "*"
     }
   });
+}
+
+/* ============ TELEGRAM ============ */
+
+async function notifyTelegram(env, { site, name, idea, hasImage, hasVoice }) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+
+  const meta = SITES[site] || {};
+  const extras = [hasImage ? "a picture" : null, hasVoice ? "a voice message" : null].filter(Boolean);
+
+  const lines = [
+    "<b>New " + esc(meta.name || site) + "</b>",
+    "from " + esc(name || "anonymous"),
+    ""
+  ];
+  lines.push(idea ? esc(idea.slice(0, 700)) : "<i>no text, see the attachment</i>");
+  if (extras.length) lines.push("", "With " + extras.join(" and ") + ".");
+  if (meta.url) lines.push("", meta.url);
+
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: env.TELEGRAM_CHAT_ID,
+        text: lines.join("\n"),
+        parse_mode: "HTML",
+        disable_web_page_preview: true
+      })
+    });
+    if (!res.ok) console.log("telegram failed:", res.status, await res.text());
+  } catch (err) {
+    console.log("telegram error:", String(err));
+  }
+}
+
+/* One time helper: message the bot, open this, and it tells you the
+   chat id to store. It goes quiet once the chat id is configured, and
+   it never reveals the bot token. */
+async function telegramSetup(env, cors) {
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    return json({ step: "Add TELEGRAM_BOT_TOKEN as a secret on this worker first." }, 200, cors);
+  }
+  if (env.TELEGRAM_CHAT_ID) {
+    return json({ done: "Notifications are configured. This helper is switched off." }, 200, cors);
+  }
+
+  const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getUpdates`);
+  if (!res.ok) {
+    return json({ error: "Telegram refused the bot token (" + res.status + ")." }, 502, cors);
+  }
+
+  const data = await res.json();
+  const chats = [];
+  for (const u of data.result || []) {
+    const chat = (u.message || u.channel_post || {}).chat;
+    if (chat && !chats.some((c) => c.chat_id === chat.id)) {
+      chats.push({ chat_id: chat.id, name: chat.first_name || chat.title || "" });
+    }
+  }
+
+  return json(chats.length
+    ? { step: "Store this as TELEGRAM_CHAT_ID on the worker.", chats }
+    : { step: "Send your bot any message in Telegram, then reload this page." }, 200, cors);
+}
+
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function json(obj, status, cors) {

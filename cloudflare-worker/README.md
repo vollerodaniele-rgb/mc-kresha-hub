@@ -52,3 +52,16 @@ Setup takes about 10 minutes, one time.
 - The token can ONLY create/edit issues on this one repo, nothing else.
 - It lives as a secret inside Cloudflare, never in the website code or the repo.
 - If it ever leaks, revoke it on GitHub (Developer settings > tokens) and make a new one.
+
+## Telegram notifications (optional)
+
+Get a message the moment anyone submits, on any of the three sites.
+
+1. In Telegram, message **@BotFather**, send `/newbot`, pick a name. He replies with a bot token.
+2. On the worker: **Settings > Variables and Secrets > Add**, type Secret, name `TELEGRAM_BOT_TOKEN`, paste the token, deploy.
+3. Open your new bot in Telegram and send it any message (say hello). This is what lets it write to you.
+4. Visit `https://kresha-idea-box.vollerodaniele.workers.dev/telegram-setup`. It returns your chat id.
+5. Add that as a second secret named `TELEGRAM_CHAT_ID`, deploy.
+
+The setup helper switches itself off once the chat id is stored, and never exposes the bot token.
+If either secret is missing, submissions carry on exactly as before, just without the ping.
