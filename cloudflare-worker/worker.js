@@ -23,8 +23,40 @@ const SITES = {
   sakasidea: {
     repo: "vollerodaniele-rgb/sakas-idea", label: "idea",
     name: "idea in the Sakas idea box", url: "https://sakasidea.noiraunoir.com/admin.html"
+  },
+  // every client portal shares one repo; the client is a second label,
+  // so adding a client needs no change here at all
+  clients: {
+    repo: "vollerodaniele-rgb/clients", label: "idea",
+    name: "client request", url: "https://clients.noiraunoir.com",
+    perClient: true
+  },
+  // a standalone idea box; the box name is a second label so boxes
+  // never see each other
+  box: {
+    repo: "vollerodaniele-rgb/clients", label: "idea",
+    name: "idea", url: "https://clients.noiraunoir.com",
+    perClient: true, clientWord: "box"
+  },
+  // someone picking a package on a proposal
+  proposal: {
+    repo: "vollerodaniele-rgb/clients", label: "accepted",
+    name: "PROPOSAL ACCEPTED", url: "https://clients.noiraunoir.com",
+    perClient: true, clientWord: "proposal"
+  },
+  // a client tapping one of the shoot dates offered on their portal.
+  // the client label is the same one a request carries, but the first
+  // label is "shoot" and not "idea", so a picked date never turns up
+  // on the requests wall or in the requests panel
+  shoot: {
+    repo: "vollerodaniele-rgb/clients", label: "shoot",
+    name: "SHOOT DATE PICKED", url: "https://clients.noiraunoir.com",
+    perClient: true, via: "the portal"
   }
 };
+
+// folder names only, which is also what the label is built from
+const CLIENT_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/;
 const DEFAULT_SITE = "kresha";
 const UPLOAD_BRANCH = "uploads";
 const MAX_IMAGE_B64 = 3000000; // base64 chars, roughly 2.2 MB of image
@@ -41,7 +73,11 @@ const ALLOWED_ORIGINS = [
   "https://kresha.noiraunoir.com",
   "http://localhost:4173",
   "http://localhost:4174",
-  "http://localhost:4175"
+  "http://localhost:4175",
+  "http://localhost:4177",
+  "https://clients.noiraunoir.com",
+  "https://proposal.noiraunoir.com",
+  "http://localhost:4176"
 ];
 
 export default {
@@ -88,7 +124,15 @@ export default {
     }
 
     const site = SITES[data.site] ? data.site : DEFAULT_SITE;
-    const { repo, label } = SITES[site];
+    const { repo, label, perClient } = SITES[site];
+
+    const rawClient = String(data.client || "");
+    const client = (SITES[site].clientWord === "proposal") ? rawClient : rawClient.toLowerCase();
+    if (perClient && !CLIENT_RE.test(client)) {
+      return json({ error: "unknown client" }, 400, cors);
+    }
+    const labelWord = SITES[site].clientWord || "client";
+    const labels = perClient ? [label, labelWord + ":" + client] : [label];
     const idea = String(data.idea || "").trim();
     const name = String(data.name || "").trim().slice(0, 60);
     const hasVoice = !!(data.audio && data.audio.data);
@@ -122,19 +166,23 @@ export default {
     }
 
     const oneLine = idea.replace(/\s+/g, " ");
+    const word = label === "accepted" ? "Accepted"
+      : label === "shoot" ? "Shoot"
+      : "Idea";
     const title = oneLine
-      ? "Idea: " + oneLine.slice(0, 60) + (oneLine.length > 60 ? "..." : "")
-      : "Idea: voice message";
+      ? word + ": " + oneLine.slice(0, 60) + (oneLine.length > 60 ? "..." : "")
+      : word + ": voice message";
     const body =
       idea +
       (imageUrl ? "\n\n![idea picture](" + imageUrl + ")" : "") +
       (audioUrl ? "\n\n[voice message](" + audioUrl + ")" : "") +
-      "\n\n---\nSubmitted by: " + (name || "anonymous") + " (via the idea box)";
+      "\n\n---\nSubmitted by: " + (name || "anonymous") +
+      " (via " + (SITES[site].via || "the idea box") + ")";
 
     const gh = await fetch(`https://api.github.com/repos/${repo}/issues`, {
       method: "POST",
       headers: ghHeaders,
-      body: JSON.stringify({ title, body, labels: [label] })
+      body: JSON.stringify({ title, body, labels })
     });
 
     if (!gh.ok) {
@@ -145,6 +193,7 @@ export default {
     // notification never keeps the sender waiting
     ctx.waitUntil(notifyTelegram(env, {
       site,
+      client,
       name,
       idea,
       hasImage: !!imageUrl,
@@ -161,10 +210,20 @@ export default {
 async function listIdeas(url, env, cors) {
   const asked = url.searchParams.get("site");
   const site = SITES[asked] ? asked : DEFAULT_SITE;
-  const { repo, label } = SITES[site];
+  const { repo, label, perClient } = SITES[site];
+
+  // on the shared clients repo, a portal must only ever see its own
+  // requests, which the client label guarantees
+  let labels = label;
+  if (perClient) {
+    const raw = String(url.searchParams.get("client") || "");
+    const client = (SITES[site].clientWord === "proposal") ? raw : raw.toLowerCase();
+    if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
+    labels = label + "," + (SITES[site].clientWord || "client") + ":" + client;
+  }
 
   const api = `https://api.github.com/repos/${repo}/issues` +
-    `?labels=${encodeURIComponent(label)}&state=open&sort=created&direction=desc&per_page=50`;
+    `?labels=${encodeURIComponent(labels)}&state=open&sort=created&direction=desc&per_page=50`;
 
   const res = await fetch(api, {
     headers: {
@@ -184,7 +243,8 @@ async function listIdeas(url, env, cors) {
     let body = i.body || "";
     let author = i.user ? i.user.login : "anonymous";
 
-    const trailer = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via the idea box\)\s*$/);
+    // the wording after "via" differs per site, so match any of them
+    const trailer = body.match(/\n*-{3,}\nSubmitted by: (.+?) \(via [^)]*\)\s*$/);
     if (trailer) {
       author = trailer[1];
       body = body.slice(0, trailer.index);
@@ -311,20 +371,29 @@ async function serveAudio(url, env) {
 
 /* ============ TELEGRAM ============ */
 
-async function notifyTelegram(env, { site, name, idea, hasImage, hasVoice }) {
+async function notifyTelegram(env, { site, client, name, idea, hasImage, hasVoice }) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
 
   const meta = SITES[site] || {};
+  const who = !meta.perClient || !client ? meta.name
+    : meta.clientWord === "proposal" ? meta.name
+    : meta.clientWord === "box" ? "idea in the " + client + " box"
+    : meta.label === "shoot" ? "shoot date from " + client.toUpperCase()
+    : client.toUpperCase() + " request";
+  const link = !meta.perClient || !client ? meta.url
+    : meta.clientWord === "proposal" ? meta.url + "/p/" + client + "/"
+    : meta.clientWord === "box" ? meta.url + "/i/" + client + "/admin.html"
+    : meta.url + "/" + client + "/admin.html";
   const extras = [hasImage ? "a picture" : null, hasVoice ? "a voice message" : null].filter(Boolean);
 
   const lines = [
-    "<b>New " + esc(meta.name || site) + "</b>",
+    "<b>New " + esc(who || site) + "</b>",
     "from " + esc(name || "anonymous"),
     ""
   ];
   lines.push(idea ? esc(idea.slice(0, 700)) : "<i>no text, see the attachment</i>");
   if (extras.length) lines.push("", "With " + extras.join(" and ") + ".");
-  if (meta.url) lines.push("", meta.url);
+  if (link) lines.push("", link);
 
   try {
     const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
