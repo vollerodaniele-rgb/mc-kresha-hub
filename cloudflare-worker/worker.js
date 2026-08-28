@@ -116,6 +116,12 @@ export default {
       return json({ error: "POST or GET only" }, 405, cors);
     }
 
+    // the one endpoint that sends mail to an address chosen by the
+    // caller, so it is the one endpoint that has to prove who is asking
+    if (new URL(request.url).pathname === "/welcome") {
+      return sendWelcome(request, env, cors);
+    }
+
     let data;
     try {
       data = await request.json();
@@ -468,6 +474,10 @@ async function telegram(env, text) {
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 const DEFAULT_FROM = "Noir au Noir <onboarding@resend.dev>";
 const REPLY_TO = "info@noiraunoir.com";
+// the line under the name in a client facing mail. One place, because
+// getting this wrong is getting it wrong in front of a client: the
+// company is a US production company, not a Belgian photographer.
+const STUDIO_LINE = "Production company &middot; Las Vegas, Nevada";
 
 async function notifyEmail(env, { site, client, name, email, idea }) {
   // say so out loud. Returning quietly here once cost an evening,
@@ -549,6 +559,178 @@ async function notifyEmail(env, { site, client, name, email, idea }) {
   } catch (err) {
     console.log("resend error:", String(err));
     return false;
+  }
+}
+
+/* ============ WELCOME A NEW PORTAL ============ */
+/* Every other route here either writes to a repo the worker owns or
+   mails an address the worker already knows. This one mails an address
+   the caller supplies, which is the definition of an open relay unless
+   the caller proves themselves. So it does: the dashboard passes the
+   admin key and it is checked against GitHub for write access to the
+   clients repo before anything is sent. The key is used for that one
+   call and never stored or logged. */
+
+const CLIENTS_REPO = "vollerodaniele-rgb/clients";
+
+async function sendWelcome(request, env, cors) {
+  let data;
+  try {
+    data = await request.json();
+  } catch {
+    return json({ error: "invalid JSON" }, 400, cors);
+  }
+
+  const key = String(data.key || "");
+  const client = String(data.client || "").toLowerCase();
+  const to = String(data.email || "").trim().slice(0, 120);
+  const who = String(data.name || "").trim().slice(0, 60);
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
+
+  // does this key actually belong to somebody who runs this studio
+  let allowed = false;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
+      headers: {
+        "Authorization": "Bearer " + key,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mc-kresha-idea-box"
+      }
+    });
+    allowed = res.ok && !!(await res.json()).permissions?.push;
+  } catch (err) {
+    console.log("welcome: could not check the key:", String(err));
+  }
+  if (!allowed) return json({ error: "that key cannot write to this studio" }, 403, cors);
+
+  // and the portal has to exist, so a typo cannot mail a stranger
+  const plan = await readJson(env, CLIENTS_REPO, `data/${client}.json`);
+  if (!plan) return json({ error: "no portal by that name" }, 404, cors);
+
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+    return json({ error: "mail is not configured on this worker" }, 503, cors);
+  }
+
+  const ok = await mailWelcome(env, { to, who, client, plan });
+  return ok
+    ? json({ ok: true }, 200, cors)
+    : json({ error: "the mail service refused it" }, 502, cors);
+}
+
+async function mailWelcome(env, { to, who, client, plan }) {
+  const brand = String(plan.name || client).trim();
+  const url = "https://clients.noiraunoir.com/" + client + "/";
+  const first = who.split(/\s+/)[0];
+  const isProject = plan.kind === "project";
+
+  const subject = "Your portal is ready";
+
+  const html = welcomeMailHtml({
+    greeting: first ? "Welcome, " + first + "." : "Welcome.",
+    line: "Everything about our work together lives in one place now, and it stays up to date as we go.",
+    brand,
+    url,
+    points: isProject
+      ? [
+          ["Where we are", "How far the work has got, and the date it lands."],
+          ["The shoot day", "Time, place, and what we are filming."],
+          ["Everything else", "What you are getting, the files when they are ready, and billing."]
+        ]
+      : [
+          ["The plan", "What we film this month and when the shoot is."],
+          ["The posting plan", "What goes out, and on which day."],
+          ["Everything else", "Deliveries, documents and billing, all in one page."]
+        ],
+    closing: "There is a box at the bottom of the page for anything you want us to film. It reaches us straight away."
+  });
+
+  const text = [
+    subject, "",
+    (first ? "Welcome, " + first + "." : "Welcome."),
+    "Everything about our work together lives in one place now:",
+    url, "",
+    "Noir au Noir", REPLY_TO
+  ].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ from: env.MAIL_FROM, to: [to], reply_to: REPLY_TO, subject, html, text })
+    });
+    if (!res.ok) console.log("welcome mail failed:", res.status, await res.text());
+    else console.log("welcome mail sent for " + client);
+    return res.ok;
+  } catch (err) {
+    console.log("welcome mail error:", String(err));
+    return false;
+  }
+}
+
+function welcomeMailHtml({ greeting, line, brand, url, points, closing }) {
+  const cell = "font-family:Arial,Helvetica,sans-serif;";
+  const rows = points.map(([t, d]) => `
+    <tr>
+      <td valign="top" style="padding:0 0 16px 0;${cell}font-size:14px;line-height:1.6;color:#ffffff;">
+        <strong style="color:#ffffff;">${esc(t)}</strong><br>
+        <span style="color:#9a9a9a;">${esc(d)}</span>
+      </td>
+    </tr>`).join("");
+
+  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
+  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
+  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(greeting)}</td></tr>
+  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(line)}</td></tr>
+  <tr><td style="padding:28px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
+      <tr><td style="padding:20px 24px 6px 24px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">Your portal</td></tr>
+      <tr><td style="padding:0 24px 18px 24px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(brand)}</td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:26px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+      <tr><td style="background-color:#ffffff;border-radius:999px;">
+        <a href="${esc(url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">Open your portal</a>
+      </td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:12px;color:#5e5e5e;">${esc(url)}</td></tr>
+  <tr><td style="padding:32px 36px 0 36px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">What is in there</td></tr>
+  <tr><td style="padding:16px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">${rows}</table>
+  </td></tr>
+  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(closing)}</td></tr>
+  <tr><td style="padding:30px 36px 32px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
+      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+/* Reads any JSON file out of a repo. */
+async function readJson(env, repo, path) {
+  try {
+    const res = await fetch(`https://raw.githubusercontent.com/${repo}/main/${path}`, {
+      headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN },
+      cf: { cacheTtl: 30, cacheEverything: true }
+    });
+    return res.ok ? await res.json() : null;
+  } catch (err) {
+    console.log("could not read " + path + ":", String(err));
+    return null;
   }
 }
 
@@ -675,7 +857,7 @@ function clientMailHtml({ greeting, line, pack, steps, closing }) {
   <tr><td style="padding:30px 36px 32px 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
       <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">Video and photography, Gent<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
+      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
     </table>
   </td></tr>
 </table>
