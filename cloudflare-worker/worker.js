@@ -81,6 +81,11 @@ const ALLOWED_ORIGINS = [
 ];
 
 export default {
+  /* Runs on the cron in wrangler.toml, not on a request. */
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(healthCheck(env, new Date(event.scheduledTime).getUTCDay() === 1));
+  },
+
   async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
     const cors = {
@@ -395,21 +400,123 @@ async function notifyTelegram(env, { site, client, name, idea, hasImage, hasVoic
   if (extras.length) lines.push("", "With " + extras.join(" and ") + ".");
   if (link) lines.push("", link);
 
+  await telegram(env, lines.join("\n"));
+}
+
+/* One place that actually talks to Telegram, used by the submission
+   pings and by the health check. */
+async function telegram(env, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return false;
   try {
     const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         chat_id: env.TELEGRAM_CHAT_ID,
-        text: lines.join("\n"),
+        text,
         parse_mode: "HTML",
         disable_web_page_preview: true
       })
     });
     if (!res.ok) console.log("telegram failed:", res.status, await res.text());
+    return res.ok;
   } catch (err) {
     console.log("telegram error:", String(err));
+    return false;
   }
+}
+
+/* ============ HEALTH CHECK ============ */
+/* The failure this exists for: a token is regenerated or loses a repo,
+   every page still renders perfectly, and every form silently stops
+   working. Nobody finds out until a client mentions it weeks later.
+   This runs every morning and only speaks when something is wrong,
+   with one all clear on Mondays so a silent checker cannot be mistaken
+   for a healthy one. */
+
+const EXPIRY_WARNING_DAYS = 14;
+
+async function healthCheck(env, isMonday) {
+  const problems = [];
+  const notes = [];
+
+  if (!env.GITHUB_TOKEN) {
+    await telegram(env, "<b>Idea box relay is down</b>\n\nThere is no GitHub token on the worker at all. Every form on every site is failing.");
+    return;
+  }
+
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box"
+  };
+
+  // one entry per distinct repo, since several sites share one
+  const repos = [...new Set(Object.values(SITES).map((s) => s.repo))];
+  let expiry = "";
+
+  for (const repo of repos) {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${repo}`, { headers });
+      expiry = expiry || res.headers.get("github-authentication-token-expiration") || "";
+
+      if (res.status === 401) {
+        problems.push(esc(repo) + ": the token was refused. It has been regenerated or revoked.");
+      } else if (res.status === 403 || res.status === 404) {
+        problems.push(esc(repo) + ": the token no longer reaches this repo (" + res.status + ").");
+      } else if (!res.ok) {
+        problems.push(esc(repo) + ": GitHub answered " + res.status + ".");
+      } else {
+        // a fine grained token reports what it may actually do here,
+        // and filing an issue needs more than read
+        const body = await res.json();
+        if (body.permissions && body.permissions.push === false) {
+          problems.push(esc(repo) + ": read only. Submissions will fail.");
+        }
+      }
+    } catch (err) {
+      problems.push(esc(repo) + ": could not be reached (" + esc(String(err)) + ").");
+    }
+  }
+
+  const days = daysUntil(expiry);
+  if (days !== null && days <= EXPIRY_WARNING_DAYS) {
+    const when = days <= 0 ? "has expired" : "expires in " + days + " day" + (days === 1 ? "" : "s");
+    problems.push("The idea-box-relay token " + when + " (" + esc(expiry.slice(0, 10)) + "). Edit its expiry, do not regenerate it.");
+  } else if (days !== null) {
+    notes.push("Token good for another " + days + " days.");
+  }
+
+  if (problems.length) {
+    await telegram(env, [
+      "<b>Something is broken</b>",
+      "",
+      ...problems.map((p) => "• " + p),
+      "",
+      "Pages still look fine, which is why this needs doing today.",
+      "https://dash.cloudflare.com"
+    ].join("\n"));
+    return;
+  }
+
+  if (isMonday) {
+    await telegram(env, [
+      "<b>All good</b>",
+      "",
+      esc(String(repos.length)) + " repos reachable, submissions working.",
+      ...notes.map((n) => esc(n))
+    ].join("\n"));
+  }
+}
+
+/* GitHub hands back the token's expiry on every authenticated call,
+   which is the only warning you get before it dies. */
+function daysUntil(stamp) {
+  if (!stamp) return null;
+  // the header looks like "2026-11-05 16:22:41 UTC"
+  const when = Date.parse(stamp.replace(" UTC", "Z").replace(" ", "T"));
+  if (isNaN(when)) return null;
+  return Math.floor((when - Date.now()) / 86400000);
 }
 
 /* One time helper: message the bot, open this, and it tells you the
