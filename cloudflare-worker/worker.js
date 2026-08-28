@@ -143,6 +143,14 @@ export default {
     const name = String(data.name || "").trim().slice(0, 60);
     const hasVoice = !!(data.audio && data.audio.data);
 
+    /* An address the sender typed. It is deliberately never written
+       into the issue: these repos are public, and putting a client's
+       email in one publishes it to every scraper there is. It reaches
+       you through Telegram and your own notification instead, both of
+       which are private. */
+    const rawEmail = String(data.email || "").trim().slice(0, 120);
+    const email = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(rawEmail) ? rawEmail : "";
+
     // a voice note can stand on its own, so text is only required
     // when nothing was recorded
     if (idea.length > 1000) {
@@ -197,12 +205,26 @@ export default {
 
     // ping Telegram after the reply is sent, so a slow or broken
     // notification never keeps the sender waiting
-    const notice = { site, client, name, idea, hasImage: !!imageUrl, hasVoice: !!audioUrl };
+    const notice = { site, client, name, email, idea, hasImage: !!imageUrl, hasVoice: !!audioUrl };
     ctx.waitUntil(notifyTelegram(env, notice));
     // only the rare, worth keeping ones go to email. Telegram already
     // carries the rest, and a mailbox full of pings is a mailbox
     // nobody reads.
     if (SITES[site].email) ctx.waitUntil(notifyEmail(env, notice));
+
+    // and the person who just accepted gets a confirmation, provided
+    // the proposal they accepted actually exists
+    if (label === "accepted" && email) {
+      ctx.waitUntil((async () => {
+        const proposal = await readProposal(env, repo, client);
+        await emailClient(env, {
+          proposal,
+          to: email,
+          name,
+          chosen: (idea.match(/Chose the (.+?) package\./) || [])[1] || ""
+        });
+      })());
+    }
 
     return json({ ok: true }, 201, cors);
   }
@@ -375,7 +397,7 @@ async function serveAudio(url, env) {
 
 /* ============ TELEGRAM ============ */
 
-async function notifyTelegram(env, { site, client, name, idea, hasImage, hasVoice }) {
+async function notifyTelegram(env, { site, client, name, email, idea, hasImage, hasVoice }) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
 
   const meta = SITES[site] || {};
@@ -396,6 +418,9 @@ async function notifyTelegram(env, { site, client, name, idea, hasImage, hasVoic
     ""
   ];
   lines.push(idea ? esc(idea.slice(0, 700)) : "<i>no text, see the attachment</i>");
+  // the address is never written to the public issue, so this and the
+  // notification email are the only places it reaches you
+  if (email) lines.push("", "Reply to: " + esc(email));
   if (extras.length) lines.push("", "With " + extras.join(" and ") + ".");
   if (link) lines.push("", link);
 
@@ -444,7 +469,7 @@ const RESEND_ENDPOINT = "https://api.resend.com/emails";
 const DEFAULT_FROM = "Noir au Noir <onboarding@resend.dev>";
 const REPLY_TO = "info@noiraunoir.com";
 
-async function notifyEmail(env, { site, client, name, idea }) {
+async function notifyEmail(env, { site, client, name, email, idea }) {
   // say so out loud. Returning quietly here once cost an evening,
   // because a missing key and a delivered mail look identical in the
   // logs when neither writes a line.
@@ -460,7 +485,7 @@ async function notifyEmail(env, { site, client, name, idea }) {
   // a proposal is addressed by an unguessable slug, so the subject has
   // to go and look up whose proposal it actually is
   const who = isProposal
-    ? await brandFor(env, meta.repo, client) || client
+    ? await (async () => { const p = await readProposal(env, meta.repo, client); return p && String(p.client || "").trim(); })() || client
     : (client || "").toUpperCase();
 
   const chosen = isProposal ? (idea.match(/Chose the (.+?) package\./) || [])[1] : "";
@@ -482,7 +507,8 @@ async function notifyEmail(env, { site, client, name, idea }) {
   const html = mailHtml({
     headline: subject,
     lead: (name ? esc(name) : "Someone") + " just did this from " +
-      (isProposal ? "the proposal you sent." : "their portal."),
+      (isProposal ? "the proposal you sent." : "their portal.") +
+      (email ? "<br>Reply to: <a href=\"mailto:" + esc(email) + "\" style=\"color:#ffffff;\">" + esc(email) + "</a>" : ""),
     detail,
     quote: extra ? extra.trim() : "",
     action: { text: isProposal ? "Open the proposal" : "Confirm the date", url: link },
@@ -526,21 +552,135 @@ async function notifyEmail(env, { site, client, name, idea }) {
   }
 }
 
-/* Reads the brand off the proposal itself. A failure here only costs a
-   nicer subject line, so it never stops the mail going out. */
-async function brandFor(env, repo, slug) {
+/* Reads the proposal itself. Used for the brand in a subject line, and
+   as the guard on client mail: no proposal, no mail to anybody. */
+async function readProposal(env, repo, slug) {
   try {
     const res = await fetch(
       `https://raw.githubusercontent.com/${repo}/main/proposals/${encodeURIComponent(slug)}.json`,
       { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN }, cf: { cacheTtl: 60, cacheEverything: true } }
     );
-    if (!res.ok) return "";
-    const data = await res.json();
-    return String(data.client || "").trim();
+    if (!res.ok) return null;
+    return await res.json();
   } catch (err) {
-    console.log("could not read the proposal brand:", String(err));
-    return "";
+    console.log("could not read the proposal:", String(err));
+    return null;
   }
+}
+
+/* The confirmation the client gets back. Every word of it is written
+   here. Nothing they typed is quoted into it, because a mail leaving
+   your own domain carrying a stranger's text is how a domain gets
+   burned, and the form is reachable by anyone holding the link. */
+async function emailClient(env, { proposal, to, name, chosen }) {
+  // the shared Resend sender only reaches your own address, so client
+  // mail waits until a verified domain of your own is configured
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+    console.log("client mail skipped: needs RESEND_API_KEY and a MAIL_FROM on a verified domain");
+    return false;
+  }
+  if (!proposal) {
+    console.log("client mail skipped: no such proposal");
+    return false;
+  }
+
+  const brand = String(proposal.client || "").trim();
+  const pack = (proposal.packages || []).find((p) => p.name === chosen) || {};
+  const steps = (proposal.process && proposal.process.steps || []).slice(0, 3);
+  const first = String(name || "").trim().split(/\s+/)[0];
+
+  const subject = "We have your choice of " + (chosen || "the package");
+
+  const html = clientMailHtml({
+    greeting: first ? "Thank you, " + first + "." : "Thank you.",
+    line: "We have your choice of <strong style=\"color:#ffffff;\">" + esc(chosen || "the package") +
+      "</strong>" + (brand ? " for " + esc(brand) : "") + ". Nothing else is needed from you today.",
+    pack: {
+      name: chosen || "",
+      tag: pack.tag || "",
+      price: pack.price || "",
+      per: pack.per || ""
+    },
+    steps,
+    closing: "We will be in touch shortly to fix the first date. Reply to this message any time."
+  });
+
+  const text = [
+    subject,
+    "",
+    (first ? "Thank you, " + first + "." : "Thank you."),
+    "We have your choice of " + (chosen || "the package") + (brand ? " for " + brand : "") + ".",
+    "",
+    ...steps.map((s, i) => (i + 1) + ". " + (s.title || "") + " " + (s.text || "")),
+    "",
+    "Noir au Noir",
+    REPLY_TO
+  ].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [to],
+        reply_to: REPLY_TO,
+        subject,
+        html,
+        text
+      })
+    });
+    if (!res.ok) console.log("client mail failed:", res.status, await res.text());
+    else console.log("client mail sent");
+    return res.ok;
+  } catch (err) {
+    console.log("client mail error:", String(err));
+    return false;
+  }
+}
+
+function clientMailHtml({ greeting, line, pack, steps, closing }) {
+  const cell = "font-family:Arial,Helvetica,sans-serif;";
+  const stepRows = steps.map((s, i) => `
+    <tr>
+      <td width="34" valign="top" style="width:34px;padding:0 0 18px 0;font-family:Georgia,'Times New Roman',serif;font-size:15px;color:#5e5e5e;">${String(i + 1).padStart(2, "0")}</td>
+      <td valign="top" style="padding:0 0 18px 0;${cell}font-size:14px;line-height:1.6;color:#ffffff;">
+        <strong style="color:#ffffff;">${esc(s.title || "")}</strong><br>
+        <span style="color:#9a9a9a;">${esc(s.text || "")}</span>
+      </td>
+    </tr>`).join("");
+
+  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
+  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
+  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(greeting)}</td></tr>
+  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${line}</td></tr>
+  ${pack.name ? `<tr><td style="padding:28px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
+      <tr><td style="padding:22px 24px 6px 24px;font-family:Georgia,'Times New Roman',serif;font-size:24px;color:#ffffff;">${esc(pack.name)}</td></tr>
+      ${pack.tag ? `<tr><td style="padding:0 24px 4px 24px;${cell}font-size:14px;line-height:1.6;color:#9a9a9a;">${esc(pack.tag)}</td></tr>` : ""}
+      ${pack.price ? `<tr><td style="padding:12px 24px 22px 24px;${cell}font-size:14px;color:#ffffff;">${esc(pack.price)} <span style="color:#9a9a9a;">${esc(pack.per || "")}</span></td></tr>` : ""}
+    </table>
+  </td></tr>` : ""}
+  ${stepRows ? `<tr><td style="padding:34px 36px 0 36px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">What happens next</td></tr>
+  <tr><td style="padding:16px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">${stepRows}</table>
+  </td></tr>` : ""}
+  <tr><td style="padding:24px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(closing)}</td></tr>
+  <tr><td style="padding:30px 36px 32px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
+      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">Video and photography, Gent<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
 }
 
 /* One shell every mail is poured into, so a second kind of mail is a
