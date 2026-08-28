@@ -504,7 +504,9 @@ async function notifyEmail(env, { site, client, name, idea }) {
     const res = await fetch(RESEND_ENDPOINT, {
       method: "POST",
       headers: {
-        "Authorization": "Bearer " + env.RESEND_API_KEY,
+        // trimmed, because a key pasted with a trailing newline is
+        // indistinguishable from a wrong one at the far end
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -659,8 +661,11 @@ async function healthCheck(env, isMonday) {
       const res = await fetch("https://api.resend.com/domains", {
         headers: { "Authorization": "Bearer " + env.RESEND_API_KEY }
       });
+      // a sending only key is allowed to send but not to read domains,
+      // so a refusal here is not evidence of anything and must never
+      // become a weekly false alarm
       if (res.status === 401 || res.status === 403) {
-        problems.push("Resend refused the mail key. Acceptances are not being emailed.");
+        notes.push("Mail key present, not checkable (a sending only key cannot be read).");
       } else if (!res.ok) {
         notes.push("Resend answered " + res.status + " on the check.");
       } else if (!env.MAIL_TO) {
@@ -711,39 +716,63 @@ function daysUntil(stamp) {
    name typed slightly differently, or a secret added to the wrong
    worker, and neither is visible from the outside without this. */
 async function mailSetup(env, cors) {
+  const raw = String(env.RESEND_API_KEY || "");
+  const key = raw.trim();
+
   const seen = {
     RESEND_API_KEY: !!env.RESEND_API_KEY,
     MAIL_TO: !!env.MAIL_TO,
     MAIL_FROM: env.MAIL_FROM ? "set" : "not set, using the shared sender"
   };
 
+  // the shape only, never the value: enough to tell a truncated paste
+  // from a stray space from something that is not a Resend key at all
+  const shape = {
+    startsWithRe: key.startsWith("re_"),
+    plausibleLength: key.length >= 25 && key.length <= 60,
+    hadSpaceOrNewline: raw !== key,
+    looksLikeAnEmail: key.includes("@")
+  };
+
   if (!env.RESEND_API_KEY || !env.MAIL_TO) {
     return json({
       sending: false,
       seen,
+      shape,
       step: "Add the missing one as a variable on this worker, spelled exactly as above, then deploy."
     }, 200, cors);
   }
 
-  let key = "unknown";
+  let verdict = "unknown";
   let domains = [];
   try {
     const res = await fetch("https://api.resend.com/domains", {
-      headers: { "Authorization": "Bearer " + env.RESEND_API_KEY }
+      headers: { "Authorization": "Bearer " + key }
     });
-    key = res.ok ? "accepted" : "refused (" + res.status + ")";
+    // Resend has two kinds of key. A sending only key can post mail but
+    // is not allowed to read domains, so a refusal on this call says
+    // nothing about whether mail works.
+    verdict = res.ok ? "accepted"
+      : (res.status === 401 || res.status === 403)
+        ? "cannot be read, which is normal for a sending only key"
+        : "refused (" + res.status + ")";
     if (res.ok) {
       const body = await res.json();
       domains = (body.data || []).map((d) => d.name + ": " + d.status);
     }
   } catch (err) {
-    key = "could not reach Resend";
+    verdict = "could not reach Resend";
   }
 
+  // settings present and the key well formed is as far as a check can
+  // get without actually sending. The proof is a real submission.
+  const armed = shape.startsWithRe && shape.plausibleLength && !!env.MAIL_TO;
+
   return json({
-    sending: key === "accepted",
+    sending: armed,
     seen,
-    key,
+    key: verdict,
+    shape,
     verifiedDomains: domains,
     note: domains.length
       ? "Mail can go to anyone at a verified domain."
