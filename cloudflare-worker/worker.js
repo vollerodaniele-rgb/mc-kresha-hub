@@ -42,7 +42,7 @@ const SITES = {
   proposal: {
     repo: "vollerodaniele-rgb/clients", label: "accepted",
     name: "PROPOSAL ACCEPTED", url: "https://clients.noiraunoir.com",
-    perClient: true, clientWord: "proposal"
+    perClient: true, clientWord: "proposal", email: true
   },
   // a client tapping one of the shoot dates offered on their portal.
   // the client label is the same one a request carries, but the first
@@ -51,7 +51,7 @@ const SITES = {
   shoot: {
     repo: "vollerodaniele-rgb/clients", label: "shoot",
     name: "SHOOT DATE PICKED", url: "https://clients.noiraunoir.com",
-    perClient: true, via: "the portal"
+    perClient: true, via: "the portal", email: true
   }
 };
 
@@ -196,14 +196,12 @@ export default {
 
     // ping Telegram after the reply is sent, so a slow or broken
     // notification never keeps the sender waiting
-    ctx.waitUntil(notifyTelegram(env, {
-      site,
-      client,
-      name,
-      idea,
-      hasImage: !!imageUrl,
-      hasVoice: !!audioUrl
-    }));
+    const notice = { site, client, name, idea, hasImage: !!imageUrl, hasVoice: !!audioUrl };
+    ctx.waitUntil(notifyTelegram(env, notice));
+    // only the rare, worth keeping ones go to email. Telegram already
+    // carries the rest, and a mailbox full of pings is a mailbox
+    // nobody reads.
+    if (SITES[site].email) ctx.waitUntil(notifyEmail(env, notice));
 
     return json({ ok: true }, 201, cors);
   }
@@ -426,6 +424,164 @@ async function telegram(env, text) {
   }
 }
 
+/* ============ EMAIL ============ */
+/* Telegram is right for "something happened". Email is right for the
+   two things worth keeping and forwarding: somebody accepting a
+   proposal, and somebody booking a shoot day.
+
+   It stays completely switched off until RESEND_API_KEY exists, so
+   this ships harmlessly and turns itself on the moment the secret is
+   added. Nothing here is hardcoded: MAIL_TO is where it lands and
+   MAIL_FROM is who it comes from, so moving off the shared Resend
+   sender onto send.noiraunoir.com is a setting, not a code change.
+
+   Fonts are Georgia and Arial rather than Playfair and Inter, because
+   Gmail and Outlook strip web fonts. Tables and inline styles, because
+   email clients are stuck in 2005. */
+
+const RESEND_ENDPOINT = "https://api.resend.com/emails";
+const DEFAULT_FROM = "Noir au Noir <onboarding@resend.dev>";
+const REPLY_TO = "info@noiraunoir.com";
+
+async function notifyEmail(env, { site, client, name, idea }) {
+  if (!env.RESEND_API_KEY || !env.MAIL_TO) return false;
+
+  const meta = SITES[site] || {};
+  const isProposal = meta.label === "accepted";
+  // a proposal is addressed by an unguessable slug, so the subject has
+  // to go and look up whose proposal it actually is
+  const who = isProposal
+    ? await brandFor(env, meta.repo, client) || client
+    : (client || "").toUpperCase();
+
+  const chosen = isProposal ? (idea.match(/Chose the (.+?) package\./) || [])[1] : "";
+  const booked = !isProposal ? (idea.match(/Picked (\d{4}-\d{2}-\d{2})(?: at (\d{1,2}:\d{2}))?/) || []) : [];
+  const extra = isProposal ? (idea.match(/Note:\s*([\s\S]+)$/) || [])[1] : "";
+
+  const subject = isProposal
+    ? (chosen ? who + " chose " + chosen : who + " accepted the proposal")
+    : (booked[1] ? who + " picked " + prettyDate(booked[1]) : who + " picked a shoot date");
+
+  const link = isProposal
+    ? meta.url + "/p/" + client + "/"
+    : meta.url + "/" + client + "/admin.html";
+
+  const detail = isProposal
+    ? { label: "The package", big: chosen || "Accepted", sub: "" }
+    : { label: "The day", big: booked[1] ? prettyDate(booked[1]) : "A date was picked", sub: booked[2] ? "at " + booked[2] : "" };
+
+  const html = mailHtml({
+    headline: subject,
+    lead: (name ? esc(name) : "Someone") + " just did this from " +
+      (isProposal ? "the proposal you sent." : "their portal."),
+    detail,
+    quote: extra ? extra.trim() : "",
+    action: { text: isProposal ? "Open the proposal" : "Confirm the date", url: link },
+    foot: isProposal
+      ? "Sent when a proposal is accepted."
+      : "Sent when a client picks a shoot date. Confirm it and it becomes their next shoot."
+  });
+
+  const text = [
+    subject,
+    "",
+    detail.label + ": " + detail.big + (detail.sub ? " " + detail.sub : ""),
+    extra ? "\nThey added: " + extra.trim() : "",
+    "",
+    link
+  ].filter((l) => l !== null).join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + env.RESEND_API_KEY,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM || DEFAULT_FROM,
+        to: [env.MAIL_TO],
+        reply_to: REPLY_TO,
+        subject,
+        html,
+        text
+      })
+    });
+    if (!res.ok) console.log("resend failed:", res.status, await res.text());
+    return res.ok;
+  } catch (err) {
+    console.log("resend error:", String(err));
+    return false;
+  }
+}
+
+/* Reads the brand off the proposal itself. A failure here only costs a
+   nicer subject line, so it never stops the mail going out. */
+async function brandFor(env, repo, slug) {
+  try {
+    const res = await fetch(
+      `https://raw.githubusercontent.com/${repo}/main/proposals/${encodeURIComponent(slug)}.json`,
+      { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN }, cf: { cacheTtl: 60, cacheEverything: true } }
+    );
+    if (!res.ok) return "";
+    const data = await res.json();
+    return String(data.client || "").trim();
+  } catch (err) {
+    console.log("could not read the proposal brand:", String(err));
+    return "";
+  }
+}
+
+/* One shell every mail is poured into, so a second kind of mail is a
+   few lines rather than another wall of table markup. */
+function mailHtml({ headline, lead, detail, quote, action, foot }) {
+  const cell = "font-family:Arial,Helvetica,sans-serif;";
+  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
+  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
+  <tr><td style="padding:22px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:29px;line-height:1.15;color:#ffffff;">${esc(headline)}</td></tr>
+  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:15px;line-height:1.6;color:#9a9a9a;">${lead}</td></tr>
+  <tr><td style="padding:26px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
+      <tr><td style="padding:20px 22px 6px 22px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">${esc(detail.label)}</td></tr>
+      <tr><td style="padding:0 22px ${detail.sub ? "4px" : "20px"} 22px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(detail.big)}</td></tr>
+      ${detail.sub ? `<tr><td style="padding:0 22px 20px 22px;${cell}font-size:14px;color:#9a9a9a;">${esc(detail.sub)}</td></tr>` : ""}
+    </table>
+  </td></tr>
+  ${quote ? `<tr><td style="padding:22px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">
+      <tr><td style="padding:0 0 6px 0;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">They added</td></tr>
+      <tr><td style="font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.6;font-style:italic;color:#ffffff;">&ldquo;${esc(quote)}&rdquo;</td></tr>
+    </table>
+  </td></tr>` : ""}
+  <tr><td style="padding:30px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+      <tr><td style="background-color:#ffffff;border-radius:999px;">
+        <a href="${esc(action.url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">${esc(action.text)}</a>
+      </td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:30px 36px 32px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
+      <tr><td style="padding:16px 0 0 0;${cell}font-size:12px;line-height:1.6;color:#5e5e5e;">${esc(foot)}</td></tr>
+    </table>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+}
+
+function prettyDate(iso) {
+  const d = new Date(iso + "T00:00:00Z");
+  if (isNaN(d.getTime())) return iso;
+  return d.getUTCDate() + " " +
+    ["January","February","March","April","May","June","July",
+     "August","September","October","November","December"][d.getUTCMonth()] + " " +
+    d.getUTCFullYear();
+}
+
 /* ============ HEALTH CHECK ============ */
 /* The failure this exists for: a token is regenerated or loses a repo,
    every page still renders perfectly, and every form silently stops
@@ -485,6 +641,27 @@ async function healthCheck(env, isMonday) {
     problems.push("The idea-box-relay token " + when + " (" + esc(expiry.slice(0, 10)) + "). Edit its expiry, do not regenerate it.");
   } else if (days !== null) {
     notes.push("Token good for another " + days + " days.");
+  }
+
+  // a dead mail key is the same silent failure as a dead github one:
+  // everything looks fine and nothing arrives
+  if (env.RESEND_API_KEY) {
+    try {
+      const res = await fetch("https://api.resend.com/domains", {
+        headers: { "Authorization": "Bearer " + env.RESEND_API_KEY }
+      });
+      if (res.status === 401 || res.status === 403) {
+        problems.push("Resend refused the mail key. Acceptances are not being emailed.");
+      } else if (!res.ok) {
+        notes.push("Resend answered " + res.status + " on the check.");
+      } else if (!env.MAIL_TO) {
+        problems.push("There is a Resend key but no MAIL_TO, so nothing has anywhere to go.");
+      } else {
+        notes.push("Mail is working.");
+      }
+    } catch (err) {
+      notes.push("Could not reach Resend (" + esc(String(err)) + ").");
+    }
   }
 
   if (problems.length) {
