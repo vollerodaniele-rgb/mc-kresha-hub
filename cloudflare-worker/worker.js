@@ -42,7 +42,7 @@ const SITES = {
   proposal: {
     repo: "vollerodaniele-rgb/clients", label: "accepted",
     name: "PROPOSAL ACCEPTED", url: "https://clients.noiraunoir.com",
-    perClient: true, clientWord: "proposal", email: true
+    perClient: true, clientWord: "proposal", via: "the proposal", email: true
   },
   // a client tapping one of the shoot dates offered on their portal.
   // the client label is the same one a request carries, but the first
@@ -108,6 +108,7 @@ export default {
       // so browsers refuse to play it. We hand it back properly typed.
       if (url.pathname === "/audio") return serveAudio(url, env);
       if (url.pathname === "/telegram-setup") return telegramSetup(env, cors);
+      if (url.pathname === "/mail-setup") return mailSetup(env, cors);
       return listIdeas(url, env, cors);
     }
 
@@ -444,7 +445,15 @@ const DEFAULT_FROM = "Noir au Noir <onboarding@resend.dev>";
 const REPLY_TO = "info@noiraunoir.com";
 
 async function notifyEmail(env, { site, client, name, idea }) {
-  if (!env.RESEND_API_KEY || !env.MAIL_TO) return false;
+  // say so out loud. Returning quietly here once cost an evening,
+  // because a missing key and a delivered mail look identical in the
+  // logs when neither writes a line.
+  if (!env.RESEND_API_KEY || !env.MAIL_TO) {
+    console.log("email skipped: RESEND_API_KEY " + (env.RESEND_API_KEY ? "set" : "MISSING") +
+      ", MAIL_TO " + (env.MAIL_TO ? "set" : "MISSING"));
+    return false;
+  }
+  console.log("emailing " + site + " for " + client);
 
   const meta = SITES[site] || {};
   const isProposal = meta.label === "accepted";
@@ -694,6 +703,52 @@ function daysUntil(stamp) {
   const when = Date.parse(stamp.replace(" UTC", "Z").replace(" ", "T"));
   if (isNaN(when)) return null;
   return Math.floor((when - Date.now()) / 86400000);
+}
+
+/* Says which mail settings this worker can actually see, and whether
+   Resend accepts the key. It reports presence and never a value, so
+   opening it gives nothing away. The commonest cause of silence is a
+   name typed slightly differently, or a secret added to the wrong
+   worker, and neither is visible from the outside without this. */
+async function mailSetup(env, cors) {
+  const seen = {
+    RESEND_API_KEY: !!env.RESEND_API_KEY,
+    MAIL_TO: !!env.MAIL_TO,
+    MAIL_FROM: env.MAIL_FROM ? "set" : "not set, using the shared sender"
+  };
+
+  if (!env.RESEND_API_KEY || !env.MAIL_TO) {
+    return json({
+      sending: false,
+      seen,
+      step: "Add the missing one as a variable on this worker, spelled exactly as above, then deploy."
+    }, 200, cors);
+  }
+
+  let key = "unknown";
+  let domains = [];
+  try {
+    const res = await fetch("https://api.resend.com/domains", {
+      headers: { "Authorization": "Bearer " + env.RESEND_API_KEY }
+    });
+    key = res.ok ? "accepted" : "refused (" + res.status + ")";
+    if (res.ok) {
+      const body = await res.json();
+      domains = (body.data || []).map((d) => d.name + ": " + d.status);
+    }
+  } catch (err) {
+    key = "could not reach Resend";
+  }
+
+  return json({
+    sending: key === "accepted",
+    seen,
+    key,
+    verifiedDomains: domains,
+    note: domains.length
+      ? "Mail can go to anyone at a verified domain."
+      : "No domain verified, so Resend will only deliver to the address the account was opened with."
+  }, 200, cors);
 }
 
 /* One time helper: message the bot, open this, and it tells you the
