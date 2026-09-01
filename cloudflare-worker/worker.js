@@ -122,6 +122,10 @@ export default {
       return sendWelcome(request, env, cors);
     }
 
+    if (new URL(request.url).pathname === "/seen") {
+      return recordSeen(request, env, ctx, cors);
+    }
+
     let data;
     try {
       data = await request.json();
@@ -559,6 +563,89 @@ async function notifyEmail(env, { site, client, name, email, idea }) {
   } catch (err) {
     console.log("resend error:", String(err));
     return false;
+  }
+}
+
+/* ============ WHO OPENED A PROPOSAL ============ */
+/* Silence after sending a proposal is ambiguous. Opened three times
+   and gone quiet is a follow up. Never opened is a different problem,
+   probably that it went to a spam folder. Without this you cannot tell
+   them apart, so you either chase too early or not at all.
+
+   Counts live in one issue per proposal, labelled "seen", so this needs
+   no new storage and no new token. */
+
+const SEEN_QUIET_HOURS = 6;
+
+async function recordSeen(request, env, ctx, cors) {
+  let data;
+  try {
+    data = await request.json();
+  } catch {
+    return json({ error: "invalid JSON" }, 400, cors);
+  }
+
+  const slug = String(data.client || "");
+  if (!CLIENT_RE.test(slug)) return json({ error: "unknown proposal" }, 400, cors);
+
+  // answer straight away, count afterwards: nobody waits on this
+  ctx.waitUntil(countView(env, slug));
+  return json({ ok: true }, 202, cors);
+}
+
+async function countView(env, slug) {
+  const repo = CLIENTS_REPO;
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box",
+    "Content-Type": "application/json"
+  };
+
+  // a proposal that does not exist is not worth a record
+  const proposal = await readProposal(env, repo, slug);
+  if (!proposal) return;
+  const brand = String(proposal.client || slug).trim();
+
+  try {
+    const labels = encodeURIComponent("seen,proposal:" + slug);
+    const found = await fetch(
+      `https://api.github.com/repos/${repo}/issues?labels=${labels}&state=all&per_page=1`,
+      { headers }
+    );
+    const existing = found.ok ? (await found.json())[0] : null;
+
+    const now = new Date().toISOString();
+    const before = existing ? (existing.body || "").match(/Opened (\d+) time/) : null;
+    const count = (before ? Number(before[1]) : 0) + 1;
+    const lastAt = existing ? (existing.body || "").match(/Last on (\S+)/) : null;
+    const quiet = !lastAt || (Date.now() - Date.parse(lastAt[1])) > SEEN_QUIET_HOURS * 3600000;
+
+    const body = "Opened " + count + " time" + (count === 1 ? "" : "s") + ".\nLast on " + now;
+
+    if (existing) {
+      await fetch(`https://api.github.com/repos/${repo}/issues/${existing.number}`, {
+        method: "PATCH", headers, body: JSON.stringify({ body })
+      });
+    } else {
+      await fetch(`https://api.github.com/repos/${repo}/issues`, {
+        method: "POST", headers,
+        body: JSON.stringify({ title: "Seen: " + brand, body, labels: ["seen", "proposal:" + slug] })
+      });
+    }
+
+    // one ping per quiet spell, not one per refresh
+    if (quiet) {
+      await telegram(env, [
+        "<b>" + esc(brand) + " opened the proposal</b>",
+        "",
+        count === 1 ? "First time." : "That is " + count + " times now.",
+        "",
+        "https://clients.noiraunoir.com/p/" + slug + "/"
+      ].join("\n"));
+    }
+  } catch (err) {
+    console.log("could not record a view:", String(err));
   }
 }
 
