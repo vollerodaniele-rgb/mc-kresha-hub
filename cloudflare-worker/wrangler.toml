@@ -7,3 +7,9 @@ workers_dev = true
 # crons are always UTC, so this drifts by an hour and that is fine.
 [triggers]
 crons = ["0 5 * * *"]
+
+# Finished work for clients. Private: nothing in here has a public
+# address, the worker hands out links that expire instead.
+[[r2_buckets]]
+binding = "DELIVERIES"
+bucket_name = "noir-deliveries"

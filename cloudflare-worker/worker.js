@@ -109,6 +109,8 @@ export default {
       if (url.pathname === "/audio") return serveAudio(url, env);
       if (url.pathname === "/telegram-setup") return telegramSetup(env, cors);
       if (url.pathname === "/mail-setup") return mailSetup(env, cors);
+      if (url.pathname === "/delivery") return listDelivery(url, env, cors);
+      if (url.pathname === "/file") return serveDelivery(url, env);
       return listIdeas(url, env, cors);
     }
 
@@ -128,6 +130,10 @@ export default {
 
     if (new URL(request.url).pathname === "/shoot-confirmed") {
       return sendShootInvite(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname === "/deliver") {
+      return acceptDelivery(request, env, cors);
     }
 
     let data;
@@ -568,6 +574,128 @@ async function notifyEmail(env, { site, client, name, email, idea }) {
     console.log("resend error:", String(err));
     return false;
   }
+}
+
+/* ============ DELIVERING THE WORK ============ */
+/* The month's finished work, kept where a client can always fetch it
+   again. This replaces a WeTransfer link that expires in seven days
+   with a page that still works next March.
+
+   Files live in R2, one folder per client per month. Nothing in the
+   bucket has a public address: every byte a client downloads is handed
+   over by this worker, which is also why downloads can be counted,
+   revoked, or restricted later without moving anything.
+
+   Uploading is guarded by the admin key, the same as the mail routes.
+   Downloading is not, deliberately: it sits at the same level as the
+   portal it belongs to, which is reachable by anyone who knows the
+   client name. Raising that is a per client code and a separate job. */
+
+const MONTH_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+// Workers cap a request body at 100MB, so refuse just under it and say
+// so, rather than failing halfway through a long upload
+const MAX_UPLOAD = 95 * 1024 * 1024;
+
+function deliveryKey(client, month, name) {
+  return client + "/" + month + "/" + name;
+}
+
+/* A file name that cannot escape its folder or carry surprises.
+   Anything with a path in it is refused rather than quietly trimmed to
+   its last part: silently storing a file under a different name than
+   the one asked for is worse than saying no. */
+function safeName(raw) {
+  const name = String(raw || "").trim();
+  if (!name || name.length > 120) return "";
+  if (/[\\/]/.test(name)) return "";
+  if (name === "." || name === "..") return "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9 ._-]*$/.test(name)) return "";
+  return name;
+}
+
+async function acceptDelivery(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const url = new URL(request.url);
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const month = String(url.searchParams.get("month") || "");
+  const name = safeName(url.searchParams.get("name"));
+  const key = request.headers.get("X-Studio-Key") || "";
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
+  if (!MONTH_RE.test(month)) return json({ error: "bad month" }, 400, cors);
+  if (!name) return json({ error: "that file name cannot be used" }, 400, cors);
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  const size = Number(request.headers.get("Content-Length") || 0);
+  if (size > MAX_UPLOAD) {
+    return json({
+      error: "that file is over 95MB, which is more than one upload can carry. " +
+        "Export it smaller, or split the delivery."
+    }, 413, cors);
+  }
+
+  try {
+    await env.DELIVERIES.put(deliveryKey(client, month, name), request.body, {
+      httpMetadata: { contentType: request.headers.get("X-File-Type") || "application/octet-stream" }
+    });
+    return json({ ok: true, name }, 201, cors);
+  } catch (err) {
+    console.log("delivery upload failed:", String(err));
+    return json({ error: "could not store it" }, 502, cors);
+  }
+}
+
+async function listDelivery(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const month = String(url.searchParams.get("month") || "");
+  if (!CLIENT_RE.test(client) || !MONTH_RE.test(month)) {
+    return json({ error: "unknown delivery" }, 400, cors);
+  }
+
+  try {
+    const listed = await env.DELIVERIES.list({ prefix: client + "/" + month + "/", limit: 500 });
+    const files = listed.objects.map((o) => ({
+      name: o.key.split("/").pop(),
+      size: o.size,
+      type: (o.httpMetadata && o.httpMetadata.contentType) || "",
+      uploaded: o.uploaded
+    })).sort((a, b) => a.name.localeCompare(b.name));
+
+    return json({ files }, 200, { ...cors, "Cache-Control": "public, max-age=30" });
+  } catch (err) {
+    console.log("could not list a delivery:", String(err));
+    return json({ error: "could not read it" }, 502, cors);
+  }
+}
+
+async function serveDelivery(url, env) {
+  if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
+
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const month = String(url.searchParams.get("month") || "");
+  const name = safeName(url.searchParams.get("name"));
+  if (!CLIENT_RE.test(client) || !MONTH_RE.test(month) || !name) {
+    return new Response("unknown file", { status: 400 });
+  }
+
+  const object = await env.DELIVERIES.get(deliveryKey(client, month, name));
+  if (!object) return new Response("not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("Cache-Control", "private, max-age=3600");
+  // download rather than open, and never under a name the URL invented
+  headers.set("Content-Disposition", 'attachment; filename="' + name.replace(/"/g, "") + '"');
+  headers.set("Access-Control-Allow-Origin", "*");
+
+  return new Response(object.body, { headers });
 }
 
 /* ============ THE SHOOT, IN THEIR CALENDAR ============ */
