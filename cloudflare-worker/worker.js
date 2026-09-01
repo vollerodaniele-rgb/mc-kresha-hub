@@ -575,8 +575,6 @@ async function notifyEmail(env, { site, client, name, email, idea }) {
    Counts live in one issue per proposal, labelled "seen", so this needs
    no new storage and no new token. */
 
-const SEEN_QUIET_HOURS = 6;
-
 async function recordSeen(request, env, ctx, cors) {
   let data;
   try {
@@ -588,12 +586,46 @@ async function recordSeen(request, env, ctx, cors) {
   const slug = String(data.client || "");
   if (!CLIENT_RE.test(slug)) return json({ error: "unknown proposal" }, 400, cors);
 
-  // answer straight away, count afterwards: nobody waits on this
-  ctx.waitUntil(countView(env, slug));
+  /* Who and where, read off the request itself. Cloudflare hands these
+     over with no extra service and no tracker on the page.
+
+     None of it is written into the issue. That repo is public, and a
+     client's address and device are theirs, not something to publish.
+     It goes to Telegram, which only he reads. */
+  const cf = request.cf || {};
+  const who = {
+    ip: request.headers.get("CF-Connecting-IP") || "",
+    device: describeDevice(request.headers.get("User-Agent") || ""),
+    place: [cf.city, cf.country].filter(Boolean).join(", "),
+    network: cf.asOrganization || ""
+  };
+
+  ctx.waitUntil(countView(env, slug, who));
   return json({ ok: true }, 202, cors);
 }
 
-async function countView(env, slug) {
+/* Enough to tell a phone from a laptop and one reader from another,
+   from the user agent alone. */
+function describeDevice(ua) {
+  const os = /iPhone/.test(ua) ? "iPhone"
+    : /iPad/.test(ua) ? "iPad"
+    : /Android/.test(ua) ? "Android"
+    : /Macintosh|Mac OS X/.test(ua) ? "Mac"
+    : /Windows/.test(ua) ? "Windows"
+    : /Linux/.test(ua) ? "Linux"
+    : "";
+
+  const browser = /Edg\//.test(ua) ? "Edge"
+    : /OPR\//.test(ua) ? "Opera"
+    : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari"
+    : "";
+
+  return [os, browser].filter(Boolean).join(", ") || "unknown device";
+}
+
+async function countView(env, slug, who) {
   const repo = CLIENTS_REPO;
   const headers = {
     "Authorization": "Bearer " + env.GITHUB_TOKEN,
@@ -618,9 +650,8 @@ async function countView(env, slug) {
     const now = new Date().toISOString();
     const before = existing ? (existing.body || "").match(/Opened (\d+) time/) : null;
     const count = (before ? Number(before[1]) : 0) + 1;
-    const lastAt = existing ? (existing.body || "").match(/Last on (\S+)/) : null;
-    const quiet = !lastAt || (Date.now() - Date.parse(lastAt[1])) > SEEN_QUIET_HOURS * 3600000;
 
+    // the issue records how often and when, and nothing about who
     const body = "Opened " + count + " time" + (count === 1 ? "" : "s") + ".\nLast on " + now;
 
     if (existing) {
@@ -634,16 +665,19 @@ async function countView(env, slug) {
       });
     }
 
-    // one ping per quiet spell, not one per refresh
-    if (quiet) {
-      await telegram(env, [
-        "<b>" + esc(brand) + " opened the proposal</b>",
-        "",
-        count === 1 ? "First time." : "That is " + count + " times now.",
-        "",
-        "https://clients.noiraunoir.com/p/" + slug + "/"
-      ].join("\n"));
-    }
+    // every single open, as asked
+    const w = who || {};
+    await telegram(env, [
+      "<b>" + esc(brand) + " opened the proposal</b>",
+      "",
+      count === 1 ? "First time." : "That is " + count + " times now.",
+      w.device ? esc(w.device) : "",
+      w.place ? esc(w.place) : "",
+      w.network ? esc(w.network) : "",
+      w.ip ? "IP " + esc(w.ip) : "",
+      "",
+      "https://clients.noiraunoir.com/p/" + slug + "/"
+    ].filter((l) => l !== "").join("\n"));
   } catch (err) {
     console.log("could not record a view:", String(err));
   }
