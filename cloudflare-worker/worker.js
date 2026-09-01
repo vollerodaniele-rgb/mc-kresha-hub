@@ -596,8 +596,13 @@ async function recordSeen(request, env, ctx, cors) {
   const who = {
     ip: request.headers.get("CF-Connecting-IP") || "",
     device: describeDevice(request.headers.get("User-Agent") || ""),
-    place: [cf.city, cf.country].filter(Boolean).join(", "),
-    network: cf.asOrganization || ""
+    place: [cf.city, cf.postalCode, cf.region, cf.country].filter(Boolean).join(", "),
+    network: [cf.asOrganization, cf.asn ? "AS" + cf.asn : ""].filter(Boolean).join(" "),
+    timezone: cf.timezone || "",
+    // IP derived, so this is the area the address belongs to and not
+    // where the person is standing. Precise location needs the browser
+    // to ask them, and they have to press Allow.
+    coords: (cf.latitude && cf.longitude) ? cf.latitude + "," + cf.longitude : ""
   };
 
   ctx.waitUntil(countView(env, slug, who));
@@ -674,7 +679,9 @@ async function countView(env, slug, who) {
       w.device ? esc(w.device) : "",
       w.place ? esc(w.place) : "",
       w.network ? esc(w.network) : "",
+      w.timezone ? esc(w.timezone) : "",
       w.ip ? "IP " + esc(w.ip) : "",
+      w.coords ? "Roughly https://www.google.com/maps?q=" + esc(w.coords) : "",
       "",
       "https://clients.noiraunoir.com/p/" + slug + "/"
     ].filter((l) => l !== "").join("\n"));
