@@ -126,6 +126,10 @@ export default {
       return recordSeen(request, env, ctx, cors);
     }
 
+    if (new URL(request.url).pathname === "/shoot-confirmed") {
+      return sendShootInvite(request, env, cors);
+    }
+
     let data;
     try {
       data = await request.json();
@@ -566,6 +570,179 @@ async function notifyEmail(env, { site, client, name, email, idea }) {
   }
 }
 
+/* ============ THE SHOOT, IN THEIR CALENDAR ============ */
+/* A date on a webpage is a date people forget. A calendar entry is not.
+   When a picked date is confirmed, the client gets one.
+
+   The whole thing turns on the time being right, and a shoot at 19:00
+   in Gent is 17:00 UTC in summer and 18:00 in winter. Getting that
+   wrong puts a client at a shoot an hour early once a year, so the
+   conversion is done properly against the real zone rather than by
+   assuming an offset. */
+
+const SHOOT_TZ = "Europe/Brussels";
+const SHOOT_HOURS = 3;
+
+function zoneOffsetMinutes(ts, tz) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit"
+  }).formatToParts(new Date(ts));
+
+  const p = Object.fromEntries(parts.map((x) => [x.type, x.value]));
+  const hour = p.hour === "24" ? 0 : Number(p.hour);
+  const asIfUtc = Date.UTC(+p.year, +p.month - 1, +p.day, hour, +p.minute, +p.second);
+  return (asIfUtc - ts) / 60000;
+}
+
+/* Wall clock time in a zone to a real instant. Two passes, because the
+   offset depends on the instant you are trying to find. */
+function zonedToUtc(date, time, tz) {
+  const [y, m, d] = String(date).split("-").map(Number);
+  const [hh, mm] = String(time || "09:00").split(":").map(Number);
+  const wall = Date.UTC(y, m - 1, d, hh || 0, mm || 0);
+  let ts = wall - zoneOffsetMinutes(wall, tz) * 60000;
+  ts = wall - zoneOffsetMinutes(ts, tz) * 60000;
+  return ts;
+}
+
+function icsStamp(ts) {
+  return new Date(ts).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+}
+
+/* Folded at 75 octets, because strict calendar clients reject longer
+   lines outright and Outlook is one of them. */
+function icsFold(line) {
+  const out = [];
+  let rest = line;
+  while (rest.length > 73) {
+    out.push(out.length ? " " + rest.slice(0, 72) : rest.slice(0, 73));
+    rest = rest.slice(out.length === 1 ? 73 : 72);
+  }
+  out.push(out.length ? " " + rest : rest);
+  return out.join("\r\n");
+}
+
+function icsEscape(s) {
+  return String(s || "").replace(/\\/g, "\\\\").replace(/;/g, "\\;")
+    .replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+}
+
+function buildIcs({ slug, date, time, location, focus, stamp }) {
+  const start = zonedToUtc(date, time, SHOOT_TZ);
+  const end = start + SHOOT_HOURS * 3600000;
+
+  return [
+    "BEGIN:VCALENDAR",
+    "VERSION:2.0",
+    "PRODID:-//Noir au Noir//Shoot//EN",
+    "CALSCALE:GREGORIAN",
+    "BEGIN:VEVENT",
+    "UID:shoot-" + slug + "-" + String(date).replace(/-/g, "") + "@noiraunoir.com",
+    "DTSTAMP:" + icsStamp(stamp),
+    "DTSTART:" + icsStamp(start),
+    "DTEND:" + icsStamp(end),
+    icsFold("SUMMARY:" + icsEscape("Shoot with Noir au Noir")),
+    location ? icsFold("LOCATION:" + icsEscape(location)) : "",
+    focus ? icsFold("DESCRIPTION:" + icsEscape(focus)) : "",
+    "END:VEVENT",
+    "END:VCALENDAR"
+  ].filter(Boolean).join("\r\n");
+}
+
+/* Same rule as the welcome: this mails an address the caller supplies,
+   so the caller proves themselves first. */
+async function sendShootInvite(request, env, cors) {
+  let data;
+  try {
+    data = await request.json();
+  } catch {
+    return json({ error: "invalid JSON" }, 400, cors);
+  }
+
+  const client = String(data.client || "").toLowerCase();
+  const to = String(data.email || "").trim().slice(0, 120);
+  const who = String(data.name || "").trim().slice(0, 60);
+  const date = String(data.date || "");
+
+  if (!data.key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return json({ error: "bad date" }, 400, cors);
+  if (!await mayWrite(env, String(data.key))) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  const plan = await readJson(env, CLIENTS_REPO, `data/${client}.json`);
+  if (!plan) return json({ error: "no portal by that name" }, 404, cors);
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+    return json({ error: "mail is not configured on this worker" }, 503, cors);
+  }
+
+  const ok = await mailShootInvite(env, {
+    to, who, client, plan, date,
+    time: String(data.time || ""),
+    location: String(data.location || ""),
+    focus: String(data.focus || "")
+  });
+
+  return ok ? json({ ok: true }, 200, cors) : json({ error: "the mail service refused it" }, 502, cors);
+}
+
+async function mailShootInvite(env, { to, who, client, plan, date, time, location, focus }) {
+  const first = who.split(/\s+/)[0];
+  const pretty = prettyDate(date);
+  const subject = "Confirmed: " + pretty + (time ? " at " + time : "");
+
+  const ics = buildIcs({ slug: client, date, time, location, focus, stamp: Date.now() });
+
+  const html = mailHtml({
+    headline: "Your shoot is confirmed",
+    lead: (first ? esc(first) + ", that" : "That") + " is the date locked in. " +
+      "The invitation is attached, so it goes straight into your calendar.",
+    detail: {
+      label: "The day",
+      big: pretty + (time ? ", " + time : ""),
+      sub: [location, focus].filter(Boolean).join(" &middot; ")
+    },
+    quote: "",
+    action: { text: "See it in your portal", url: "https://clients.noiraunoir.com/" + client + "/" },
+    foot: "Anything you need to have ready is listed in your portal."
+  });
+
+  const text = [subject, "", location, focus, "",
+    "https://clients.noiraunoir.com/" + client + "/"].filter(Boolean).join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [to],
+        reply_to: REPLY_TO,
+        subject,
+        html,
+        text,
+        attachments: [{
+          filename: "shoot.ics",
+          content: btoa(unescape(encodeURIComponent(ics)))
+        }]
+      })
+    });
+    if (!res.ok) console.log("shoot invite failed:", res.status, await res.text());
+    else console.log("shoot invite sent for " + client);
+    return res.ok;
+  } catch (err) {
+    console.log("shoot invite error:", String(err));
+    return false;
+  }
+}
+
 /* ============ WHO OPENED A PROPOSAL ============ */
 /* Silence after sending a proposal is ambiguous. Opened three times
    and gone quiet is a follow up. Never opened is a different problem,
@@ -701,6 +878,27 @@ async function countView(env, slug, who) {
 
 const CLIENTS_REPO = "vollerodaniele-rgb/clients";
 
+/* Does this key belong to somebody who runs this studio. Asked of
+   GitHub, not taken on trust, and the key is used for this one call
+   and never stored or logged. Every route that mails an address the
+   caller supplies goes through here first. */
+async function mayWrite(env, key) {
+  if (!key) return false;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
+      headers: {
+        "Authorization": "Bearer " + key,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mc-kresha-idea-box"
+      }
+    });
+    return res.ok && !!(await res.json()).permissions?.push;
+  } catch (err) {
+    console.log("could not check the key:", String(err));
+    return false;
+  }
+}
+
 async function sendWelcome(request, env, cors) {
   let data;
   try {
@@ -718,21 +916,9 @@ async function sendWelcome(request, env, cors) {
   if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
 
-  // does this key actually belong to somebody who runs this studio
-  let allowed = false;
-  try {
-    const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
-      headers: {
-        "Authorization": "Bearer " + key,
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "mc-kresha-idea-box"
-      }
-    });
-    allowed = res.ok && !!(await res.json()).permissions?.push;
-  } catch (err) {
-    console.log("welcome: could not check the key:", String(err));
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
   }
-  if (!allowed) return json({ error: "that key cannot write to this studio" }, 403, cors);
 
   // and the portal has to exist, so a typo cannot mail a stranger
   const plan = await readJson(env, CLIENTS_REPO, `data/${client}.json`);
