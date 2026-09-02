@@ -123,6 +123,8 @@ export default {
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       if (url.pathname === "/call/slots") return openSlots(env, cors);
       if (url.pathname === "/call/invite") return readInvite(url, env, cors);
+      if (url.pathname === "/ref") return readPartner(url, env, cors);
+      if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
     }
@@ -155,6 +157,10 @@ export default {
 
     if (new URL(request.url).pathname.startsWith("/call/")) {
       return handleCall(request, env, ctx, cors);
+    }
+
+    if (new URL(request.url).pathname.startsWith("/ref/")) {
+      return handlePartner(request, env, ctx, cors);
     }
 
     let data;
@@ -719,6 +725,140 @@ async function serveDelivery(url, env) {
   return new Response(object.body, { headers });
 }
 
+/* ============ REFERRAL PARTNERS ============ */
+/* A photographer gets their own page, with their name on it, to send
+   to their own clients. Since a fee is paid per client who books, the
+   thing that actually matters is attribution: who sent whom. So opens
+   are counted and bookings are tied back to the link they came from. */
+
+const partnerKey = (id) => "_ref/" + id + ".json";
+
+async function readPartnerRecord(env, id) {
+  const object = await env.DELIVERIES.get(partnerKey(id));
+  if (!object) return null;
+  try {
+    return await object.json();
+  } catch {
+    return null;
+  }
+}
+
+async function readPartner(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const id = String(url.searchParams.get("id") || "");
+  if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+
+  const partner = await readPartnerRecord(env, id);
+  if (!partner) return json({ error: "gone" }, 404, cors);
+
+  // only what the page needs. The fee and the tally are his business.
+  return json({
+    name: partner.name || "",
+    discount: partner.discount || "",
+    note: partner.note || ""
+  }, 200, cors);
+}
+
+async function listPartners(request, url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
+
+  const listed = await env.DELIVERIES.list({ prefix: "_ref/", limit: 1000 });
+  const booked = await readBookings(env);
+
+  const partners = [];
+  for (const o of listed.objects) {
+    const object = await env.DELIVERIES.get(o.key);
+    if (!object) continue;
+    try {
+      const p = await object.json();
+      const theirs = booked.filter((b) => b.ref === p.id);
+      partners.push({
+        id: p.id,
+        name: p.name || "",
+        discount: p.discount || "",
+        at: p.at || "",
+        opens: p.opens || 0,
+        lastOpen: p.lastOpen || "",
+        calls: theirs.length,
+        who: theirs.map((b) => ({ name: b.name, date: b.date, time: b.time }))
+      });
+    } catch { /* one broken record should not hide the rest */ }
+  }
+
+  partners.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  return json({ partners }, 200, cors);
+}
+
+async function handlePartner(request, env, ctx, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const action = new URL(request.url).pathname.slice("/ref/".length);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid JSON" }, 400, cors);
+  }
+
+  /* Counting an open is public, because the page counting itself is
+     the whole idea. It writes nothing a caller controls. */
+  if (action === "seen") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+    ctx.waitUntil(notePartnerOpen(env, id));
+    return json({ ok: true }, 202, cors);
+  }
+
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  if (action === "new") {
+    const name = String(body.name || "").trim().slice(0, 60);
+    if (!name) return json({ error: "give it a name" }, 400, cors);
+
+    const id = newTransferId();
+    await env.DELIVERIES.put(partnerKey(id), JSON.stringify({
+      id, name,
+      discount: String(body.discount || "").trim().slice(0, 40),
+      note: String(body.note || "").trim().slice(0, 300),
+      opens: 0, lastOpen: "",
+      at: new Date().toISOString()
+    }), { httpMetadata: { contentType: "application/json" } });
+
+    return json({ ok: true, id }, 201, cors);
+  }
+
+  if (action === "remove") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "unknown partner" }, 400, cors);
+    await env.DELIVERIES.delete(partnerKey(id));
+    return json({ ok: true }, 200, cors);
+  }
+
+  return json({ error: "unknown action" }, 404, cors);
+}
+
+async function notePartnerOpen(env, id) {
+  try {
+    const partner = await readPartnerRecord(env, id);
+    if (!partner) return;
+    partner.opens = (partner.opens || 0) + 1;
+    partner.lastOpen = new Date().toISOString();
+    await env.DELIVERIES.put(partnerKey(id), JSON.stringify(partner), {
+      httpMetadata: { contentType: "application/json" }
+    });
+  } catch (err) {
+    console.log("could not note a partner open:", String(err));
+  }
+}
+
 /* ============ BOOKING A CALL ============ */
 /* The same idea as a client picking a shoot date, pointed at someone
    who is not a client yet. You offer times, they take one, and it
@@ -880,6 +1020,9 @@ async function handleCall(request, env, ctx, cors) {
     const email = String(body.email || "").trim().slice(0, 120);
     const about = String(body.note || "").trim().slice(0, 500);
     const from = String(body.invite || "");
+    // which partner sent them, if any. The fee is paid per booking, so
+    // this is the number that decides what anybody is owed.
+    const ref = TRANSFER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
 
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
@@ -912,6 +1055,7 @@ async function handleCall(request, env, ctx, cors) {
       date, time, name, email, note: about,
       minutes,
       invite: from || "",
+      ref,
       at: new Date().toISOString()
     };
 
@@ -1022,6 +1166,7 @@ async function confirmCall(env, record) {
     "<b>Call booked</b>",
     "",
     esc(record.name) + " &middot; " + esc(record.email),
+    record.ref ? "Sent by a partner" : "",
     esc(prettyDate(record.date)) + " at " + esc(record.time),
     record.note ? "\n" + esc(record.note) : ""
   ].filter(Boolean).join("\n"));
