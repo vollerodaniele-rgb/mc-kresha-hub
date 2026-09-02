@@ -1171,7 +1171,9 @@ async function confirmCall(env, record) {
   await telegram(env, [
     "<b>Call booked</b>",
     "",
-    esc(record.name) + " &middot; " + esc(record.email),
+    // the character itself, not an entity: Telegram only understands
+    // &lt; &gt; and &amp;, so anything else arrives as literal text
+    esc(record.name) + " · " + esc(record.email),
     record.phone ? "<b>" + esc(record.phone) + "</b>" : "",
     record.ref ? "Sent by a partner" : "",
     esc(prettyDate(record.date)) + " at " + esc(record.time),
@@ -1200,8 +1202,10 @@ async function confirmCall(env, record) {
       label: "The call",
       big: prettyDate(record.date) + ", " + record.time,
       // saying who rings whom, or both sides sit waiting for the other
+      // plain text, not markup: this whole line is escaped downstream,
+      // so an entity here arrives on the page as its own source
       sub: record.minutes + " minutes" +
-        (record.phone ? " &middot; I will call you on " + esc(record.phone) : "")
+        (record.phone ? " · I will call you on " + record.phone : "")
     },
     quote: "",
     action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
@@ -1730,7 +1734,7 @@ async function mailShootInvite(env, { to, who, client, plan, date, time, locatio
     detail: {
       label: "The day",
       big: pretty + (time ? ", " + time : ""),
-      sub: [location, focus].filter(Boolean).join(" &middot; ")
+      sub: [location, focus].filter(Boolean).join(" · ")
     },
     quote: "",
     action: { text: "See it in your portal", url: "https://clients.noiraunoir.com/" + client + "/" },
