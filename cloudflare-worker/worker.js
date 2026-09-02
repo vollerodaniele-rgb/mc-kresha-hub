@@ -794,6 +794,9 @@ async function listPartners(request, url, env, cors) {
 
   const listed = await env.DELIVERIES.list({ prefix: "_ref/", limit: 1000 });
   const booked = await readBookings(env);
+  // a partner is owed for anyone they sent who wanted a call, whether
+  // that person took an hour or left a number
+  const asked = await readAsks(env);
 
   const partners = [];
   for (const o of listed.objects) {
@@ -801,7 +804,10 @@ async function listPartners(request, url, env, cors) {
     if (!object) continue;
     try {
       const p = await object.json();
-      const theirs = booked.filter((b) => b.ref === p.id);
+      const theirs = [
+        ...booked.filter((b) => b.ref === p.id),
+        ...asked.filter((a) => a.ref === p.id)
+      ];
       partners.push({
         id: p.id,
         name: p.name || "",
@@ -810,7 +816,7 @@ async function listPartners(request, url, env, cors) {
         opens: p.opens || 0,
         lastOpen: p.lastOpen || "",
         calls: theirs.length,
-        who: theirs.map((b) => ({ name: b.name, date: b.date, time: b.time }))
+        who: theirs.map((b) => ({ name: b.name, date: b.date || "", time: b.time || "" }))
       });
     } catch { /* one broken record should not hide the rest */ }
   }
@@ -1014,6 +1020,25 @@ async function openSlots(env, cors) {
   return json({ slots: open, minutes, note }, 200, cors);
 }
 
+/* Someone who asked to be rung rather than taking an hour. Kept
+   beside the bookings because to him they are the same thing: a
+   stranger who wants a call, waiting in the agenda. */
+const askKey = (id) => "_call/asks/" + id + ".json";
+
+async function readAsks(env) {
+  const listed = await env.DELIVERIES.list({ prefix: "_call/asks/", limit: 1000 });
+  const out = [];
+  for (const o of listed.objects) {
+    const object = await env.DELIVERIES.get(o.key);
+    if (!object) continue;
+    try {
+      out.push(await object.json());
+    } catch { /* one broken request should not hide the rest */ }
+  }
+  // newest first: the one to ring is the one that just came in
+  return out.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+}
+
 async function listCalls(request, url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
   const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
@@ -1022,6 +1047,7 @@ async function listCalls(request, url, env, cors) {
   const { slots, minutes, note } = await readSlots(env);
   return json({
     booked: await readBookings(env),
+    asks: await readAsks(env),
     invites: await listInvites(env),
     slots, minutes, note
   }, 200, cors);
@@ -1109,6 +1135,38 @@ async function handleCall(request, env, ctx, cors) {
     return json({ ok: true }, 201, cors);
   }
 
+  /* Somebody who would rather not pick an hour out of a list. They
+     leave a number and get rung back. It takes no slot, so it can
+     never collide with a booking, and like booking it cannot be made
+     to mail an address of the caller's choosing. */
+  if (action === "back") {
+    const name = String(body.name || "").trim().slice(0, 60);
+    const email = String(body.email || "").trim().slice(0, 120);
+    const about = String(body.note || "").trim().slice(0, 500);
+    const rawPhone = String(body.phone || "").trim().slice(0, 30);
+    const phone = /^[+(\d][\d\s()./-]{5,}$/.test(rawPhone) ? rawPhone : "";
+    const ref = PARTNER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
+
+    if (body.website) return json({ ok: true }, 201, cors);
+    if (!name) return json({ error: "no name" }, 400, cors);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return json({ error: "bad email" }, 400, cors);
+    if (!phone) return json({ error: "bad phone" }, 400, cors);
+
+    const record = {
+      id: newTransferId(),
+      name, email, phone, note: about, ref,
+      done: false,
+      at: new Date().toISOString()
+    };
+
+    await env.DELIVERIES.put(askKey(record.id), JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
+    });
+
+    ctx.waitUntil(confirmAsk(env, record));
+    return json({ ok: true }, 201, cors);
+  }
+
   // everything below changes what is offered, so it needs the key.
   // Missing and wrong answer differently, the same as every other
   // guarded route here.
@@ -1162,6 +1220,26 @@ async function handleCall(request, env, ctx, cors) {
     const id = String(body.id || "");
     if (!TRANSFER_RE.test(id)) return json({ error: "unknown link" }, 400, cors);
     await env.DELIVERIES.delete(inviteKey(id));
+    return json({ ok: true }, 200, cors);
+  }
+
+  if (action === "called") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "unknown request" }, 400, cors);
+    const object = await env.DELIVERIES.get(askKey(id));
+    if (!object) return json({ error: "unknown request" }, 404, cors);
+    const record = await object.json();
+    record.done = body.done !== false;
+    await env.DELIVERIES.put(askKey(id), JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true, done: record.done }, 200, cors);
+  }
+
+  if (action === "forget") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "unknown request" }, 400, cors);
+    await env.DELIVERIES.delete(askKey(id));
     return json({ ok: true }, 200, cors);
   }
 
@@ -1264,6 +1342,65 @@ async function confirmCall(env, record) {
     if (!res.ok) console.log("call confirmation failed:", res.status, await res.text());
   } catch (err) {
     console.log("call confirmation error:", String(err));
+  }
+}
+
+/* He gets the number straight away, because this one is only useful
+   while it is fresh. They get a short note so the page does not just
+   swallow their details in silence. */
+async function confirmAsk(env, record) {
+  await telegram(env, [
+    "<b>Asked for a call</b>",
+    "",
+    // the character itself, never an entity: Telegram understands only
+    // &lt; &gt; and &amp; and prints the rest as source
+    esc(record.name) + " · " + esc(record.email),
+    "<b>" + esc(record.phone) + "</b>",
+    record.ref ? "Sent by " + esc(record.ref) : "",
+    record.note ? "\n" + esc(record.note) : ""
+  ].filter(Boolean).join("\n"));
+
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) return;
+
+  const first = record.name.split(/\s+/)[0];
+  const subject = "We will call you";
+
+  const html = mailHtml({
+    headline: "We will call you",
+    lead: (first ? esc(first) + ", we" : "We") +
+      " have your number and will ring within one working day. Twenty minutes, and there is nothing to prepare.",
+    detail: {
+      label: "The number we will ring",
+      big: record.phone,
+      sub: "If that is the wrong one, reply to this and say so"
+    },
+    quote: "",
+    action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
+    foot: "If you would rather pick the hour yourself, reply and we will send you times."
+  });
+
+  const text = [subject, "",
+    "We have your number and will ring within one working day.",
+    "The number we have is " + record.phone + ".",
+    "", "Reply to this if that is wrong.", "Noir au Noir"].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [record.email],
+        reply_to: REPLY_TO,
+        subject, html, text
+      })
+    });
+    if (!res.ok) console.log("call back note failed:", res.status, await res.text());
+  } catch (err) {
+    console.log("call back note error:", String(err));
   }
 }
 
