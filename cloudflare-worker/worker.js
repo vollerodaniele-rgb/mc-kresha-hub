@@ -84,6 +84,9 @@ export default {
   /* Runs on the cron in wrangler.toml, not on a request. */
   async scheduled(event, env, ctx) {
     ctx.waitUntil(healthCheck(env, new Date(event.scheduledTime).getUTCDay() === 1));
+    // an expired transfer is unreachable but still costs storage, so
+    // it is swept rather than left to accumulate forever
+    ctx.waitUntil(sweepExpiredTransfers(env));
   },
 
   async fetch(request, env, ctx) {
@@ -115,6 +118,9 @@ export default {
       if (url.pathname === "/mail-setup") return mailSetup(env, cors);
       if (url.pathname === "/delivery") return listDelivery(url, env, cors);
       if (url.pathname === "/file") return serveDelivery(url, env);
+      if (url.pathname === "/transfer") return readTransfer(url, env, cors);
+      if (url.pathname === "/transfer/file") return serveTransferFile(url, env);
+      if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       return listIdeas(url, env, cors);
     }
 
@@ -138,6 +144,10 @@ export default {
 
     if (new URL(request.url).pathname === "/deliver") {
       return acceptDelivery(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname.startsWith("/transfer/")) {
+      return handleTransfer(request, env, cors);
     }
 
     let data;
@@ -700,6 +710,233 @@ async function serveDelivery(url, env) {
   headers.set("Access-Control-Allow-Origin", "*");
 
   return new Response(object.body, { headers });
+}
+
+/* ============ SENDING FILES TO ANYONE ============ */
+/* A transfer: make a link, put files behind it, send it to whoever.
+   Not tied to a client and not tied to a portal. The difference from
+   the services that do this is that the link is yours, it does not
+   expire in seven days unless you say so, and you can kill it.
+
+   Everything lives under _t/<id>/ in the same bucket. A client folder
+   can never collide with it, because a client name has to start with a
+   letter or a digit and this starts with an underscore. */
+
+const TRANSFER_RE = /^[A-Za-z0-9_-]{10,24}$/;
+const TRANSFER_PREFIX = "_t/";
+
+const metaKey = (id) => TRANSFER_PREFIX + id + "/meta.json";
+const transferFileKey = (id, name) => TRANSFER_PREFIX + id + "/files/" + name;
+
+function newTransferId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(9));
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+async function readMeta(env, id) {
+  const object = await env.DELIVERIES.get(metaKey(id));
+  if (!object) return null;
+  try {
+    return await object.json();
+  } catch {
+    return null;
+  }
+}
+
+function transferIsGone(meta) {
+  if (!meta) return true;
+  if (!meta.expires) return false;
+  // an expiry is a date, so it dies at the end of that day
+  return Date.now() > Date.parse(meta.expires + "T23:59:59Z");
+}
+
+/* Everything that changes a transfer, behind the studio key. */
+async function handleTransfer(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const url = new URL(request.url);
+  const action = url.pathname.slice("/transfer/".length);
+  const key = request.headers.get("X-Studio-Key") || "";
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  if (action === "new") {
+    const id = newTransferId();
+    const meta = {
+      id,
+      title: "",
+      note: "",
+      created: new Date().toISOString(),
+      expires: ""
+    };
+    await env.DELIVERIES.put(metaKey(id), JSON.stringify(meta), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true, id }, 201, cors);
+  }
+
+  const id = String(url.searchParams.get("id") || "");
+  if (!TRANSFER_RE.test(id)) return json({ error: "unknown link" }, 400, cors);
+
+  if (action === "meta") {
+    const meta = await readMeta(env, id);
+    if (!meta) return json({ error: "unknown link" }, 404, cors);
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "invalid JSON" }, 400, cors);
+    }
+
+    meta.title = String(body.title || "").slice(0, 80);
+    meta.note = String(body.note || "").slice(0, 500);
+    meta.expires = /^\d{4}-\d{2}-\d{2}$/.test(String(body.expires || "")) ? body.expires : "";
+
+    await env.DELIVERIES.put(metaKey(id), JSON.stringify(meta), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true }, 200, cors);
+  }
+
+  if (action === "upload") {
+    const meta = await readMeta(env, id);
+    if (!meta) return json({ error: "unknown link" }, 404, cors);
+
+    const name = safeName(url.searchParams.get("name"));
+    if (!name) return json({ error: "that file name cannot be used" }, 400, cors);
+
+    const size = Number(request.headers.get("Content-Length") || 0);
+    if (size > MAX_UPLOAD) {
+      return json({ error: "that file is over 95MB, which is more than one upload can carry." }, 413, cors);
+    }
+
+    await env.DELIVERIES.put(transferFileKey(id, name), request.body, {
+      httpMetadata: { contentType: request.headers.get("X-File-Type") || "application/octet-stream" }
+    });
+    return json({ ok: true, name }, 201, cors);
+  }
+
+  /* Killing a link really deletes the files. A transfer nobody can
+     reach but that still costs storage is the worst of both. */
+  if (action === "kill") {
+    const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX + id + "/", limit: 1000 });
+    for (const object of listed.objects) await env.DELIVERIES.delete(object.key);
+    return json({ ok: true, removed: listed.objects.length }, 200, cors);
+  }
+
+  if (action === "remove") {
+    const name = safeName(url.searchParams.get("name"));
+    if (!name) return json({ error: "unknown file" }, 400, cors);
+    await env.DELIVERIES.delete(transferFileKey(id, name));
+    return json({ ok: true }, 200, cors);
+  }
+
+  return json({ error: "unknown action" }, 404, cors);
+}
+
+async function sweepExpiredTransfers(env) {
+  if (!env.DELIVERIES) return;
+  try {
+    const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX, limit: 1000 });
+    const ids = [...new Set(listed.objects.map((o) => o.key.split("/")[1]))];
+
+    let removed = 0;
+    for (const id of ids) {
+      const meta = await readMeta(env, id);
+      if (!meta || !meta.expires || !transferIsGone(meta)) continue;
+      for (const o of listed.objects.filter((x) => x.key.startsWith(TRANSFER_PREFIX + id + "/"))) {
+        await env.DELIVERIES.delete(o.key);
+        removed++;
+      }
+    }
+    if (removed) console.log("swept " + removed + " expired transfer objects");
+  } catch (err) {
+    console.log("could not sweep transfers:", String(err));
+  }
+}
+
+/* What the person holding the link sees. No key, by design: the link
+   is the permission. */
+async function readTransfer(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const id = String(url.searchParams.get("id") || "");
+  if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+
+  const meta = await readMeta(env, id);
+  // a killed link and a link that never existed answer identically, so
+  // nothing can be learned by trying
+  if (transferIsGone(meta)) return json({ error: "gone" }, 404, cors);
+
+  const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX + id + "/files/", limit: 500 });
+  const files = listed.objects.map((o) => ({
+    name: o.key.split("/").pop(),
+    size: o.size
+  })).sort((a, b) => a.name.localeCompare(b.name));
+
+  return json({
+    title: meta.title || "",
+    note: meta.note || "",
+    expires: meta.expires || "",
+    files
+  }, 200, cors);
+}
+
+async function serveTransferFile(url, env) {
+  if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
+
+  const id = String(url.searchParams.get("id") || "");
+  const name = safeName(url.searchParams.get("name"));
+  if (!TRANSFER_RE.test(id) || !name) return new Response("gone", { status: 404 });
+
+  // the expiry is checked on every file, not only on the page, or a
+  // saved direct link would outlive the transfer
+  if (transferIsGone(await readMeta(env, id))) return new Response("gone", { status: 404 });
+
+  const object = await env.DELIVERIES.get(transferFileKey(id, name));
+  if (!object) return new Response("not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("Content-Disposition", 'attachment; filename="' + name.replace(/"/g, "") + '"');
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(object.body, { headers });
+}
+
+/* The list for the dashboard, so old links can be found and killed. */
+async function listTransfers(request, url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
+
+  const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX, limit: 1000 });
+  const ids = [...new Set(listed.objects.map((o) => o.key.split("/")[1]))];
+
+  const transfers = [];
+  for (const id of ids) {
+    const meta = await readMeta(env, id);
+    if (!meta) continue;
+    const files = listed.objects.filter((o) => o.key.startsWith(TRANSFER_PREFIX + id + "/files/"));
+    transfers.push({
+      id,
+      title: meta.title || "",
+      created: meta.created || "",
+      expires: meta.expires || "",
+      expired: transferIsGone(meta),
+      files: files.length,
+      size: files.reduce((t, o) => t + o.size, 0)
+    });
+  }
+
+  transfers.sort((a, b) => String(b.created).localeCompare(String(a.created)));
+  return json({ transfers }, 200, cors);
 }
 
 /* ============ THE SHOOT, IN THEIR CALENDAR ============ */
