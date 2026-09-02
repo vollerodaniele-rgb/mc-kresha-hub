@@ -739,6 +739,16 @@ const PARTNER_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
 const partnerKey = (id) => "_ref/" + id + ".json";
 
+/* Partner links were random strings before they were names, and the
+   ones made back then are still real pages somebody may be holding.
+   So anything that takes an existing id accepts either shape. Making
+   a new one is still strictly a name.
+
+   This is not academic: for a while the older partners could not be
+   read and could not be deleted, and the dashboard showed the delete
+   quietly doing nothing. */
+const partnerIdOk = (id) => PARTNER_RE.test(id) || TRANSFER_RE.test(id);
+
 function slugify(name) {
   return String(name || "")
     .toLowerCase()
@@ -753,7 +763,7 @@ function slugify(name) {
 async function freePartnerSlug(env, wanted) {
   for (let n = 1; n <= 20; n++) {
     const id = n === 1 ? wanted : wanted + "-" + n;
-    if (!PARTNER_RE.test(id)) return "";
+    if (!PARTNER_RE.test(id)) return "";   // a new one is always a name
     const existing = await env.DELIVERIES.get(partnerKey(id));
     if (!existing) return id;
   }
@@ -774,7 +784,7 @@ async function readPartner(url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
 
   const id = String(url.searchParams.get("id") || "");
-  if (!PARTNER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+  if (!partnerIdOk(id)) return json({ error: "gone" }, 404, cors);
 
   const partner = await readPartnerRecord(env, id);
   if (!partner) return json({ error: "gone" }, 404, cors);
@@ -841,7 +851,7 @@ async function handlePartner(request, env, ctx, cors) {
      the whole idea. It writes nothing a caller controls. */
   if (action === "seen") {
     const id = String(body.id || "");
-    if (!PARTNER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+    if (!partnerIdOk(id)) return json({ error: "gone" }, 404, cors);
     ctx.waitUntil(notePartnerOpen(env, id));
     return json({ ok: true }, 202, cors);
   }
@@ -872,7 +882,7 @@ async function handlePartner(request, env, ctx, cors) {
 
   if (action === "remove") {
     const id = String(body.id || "");
-    if (!PARTNER_RE.test(id)) return json({ error: "unknown partner" }, 400, cors);
+    if (!partnerIdOk(id)) return json({ error: "unknown partner" }, 400, cors);
     await env.DELIVERIES.delete(partnerKey(id));
     return json({ ok: true }, 200, cors);
   }
@@ -1081,7 +1091,7 @@ async function handleCall(request, env, ctx, cors) {
     const from = String(body.invite || "");
     // which partner sent them, if any. The fee is paid per booking, so
     // this is the number that decides what anybody is owed.
-    const ref = PARTNER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
+    const ref = partnerIdOk(String(body.ref || "")) ? String(body.ref) : "";
 
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
@@ -1145,7 +1155,7 @@ async function handleCall(request, env, ctx, cors) {
     const about = String(body.note || "").trim().slice(0, 500);
     const rawPhone = String(body.phone || "").trim().slice(0, 30);
     const phone = /^[+(\d][\d\s()./-]{5,}$/.test(rawPhone) ? rawPhone : "";
-    const ref = PARTNER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
+    const ref = partnerIdOk(String(body.ref || "")) ? String(body.ref) : "";
 
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
