@@ -731,7 +731,34 @@ async function serveDelivery(url, env) {
    thing that actually matters is attribution: who sent whom. So opens
    are counted and bookings are tied back to the link they came from. */
 
+/* A partner link is meant to be handed around, so it reads as a name
+   rather than a random string. That makes it guessable, which is fine:
+   behind it is a page about the studio with somebody's name on it, and
+   nothing that matters is decided by holding one. */
+const PARTNER_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
+
 const partnerKey = (id) => "_ref/" + id + ".json";
+
+function slugify(name) {
+  return String(name || "")
+    .toLowerCase()
+    .normalize("NFD").replace(/[̀-ͯ]/g, "")   // Dubois, Dubois
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+}
+
+/* First come, first served, and never silently overwriting somebody
+   else's page. A second Marie becomes marie-2. */
+async function freePartnerSlug(env, wanted) {
+  for (let n = 1; n <= 20; n++) {
+    const id = n === 1 ? wanted : wanted + "-" + n;
+    if (!PARTNER_RE.test(id)) return "";
+    const existing = await env.DELIVERIES.get(partnerKey(id));
+    if (!existing) return id;
+  }
+  return "";
+}
 
 async function readPartnerRecord(env, id) {
   const object = await env.DELIVERIES.get(partnerKey(id));
@@ -747,7 +774,7 @@ async function readPartner(url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
 
   const id = String(url.searchParams.get("id") || "");
-  if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+  if (!PARTNER_RE.test(id)) return json({ error: "gone" }, 404, cors);
 
   const partner = await readPartnerRecord(env, id);
   if (!partner) return json({ error: "gone" }, 404, cors);
@@ -808,7 +835,7 @@ async function handlePartner(request, env, ctx, cors) {
      the whole idea. It writes nothing a caller controls. */
   if (action === "seen") {
     const id = String(body.id || "");
-    if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+    if (!PARTNER_RE.test(id)) return json({ error: "gone" }, 404, cors);
     ctx.waitUntil(notePartnerOpen(env, id));
     return json({ ok: true }, 202, cors);
   }
@@ -823,7 +850,9 @@ async function handlePartner(request, env, ctx, cors) {
     const name = String(body.name || "").trim().slice(0, 60);
     if (!name) return json({ error: "give it a name" }, 400, cors);
 
-    const id = newTransferId();
+    const id = await freePartnerSlug(env, slugify(name));
+    if (!id) return json({ error: "that name cannot be used as a link" }, 400, cors);
+
     await env.DELIVERIES.put(partnerKey(id), JSON.stringify({
       id, name,
       discount: String(body.discount || "").trim().slice(0, 40),
@@ -837,7 +866,7 @@ async function handlePartner(request, env, ctx, cors) {
 
   if (action === "remove") {
     const id = String(body.id || "");
-    if (!TRANSFER_RE.test(id)) return json({ error: "unknown partner" }, 400, cors);
+    if (!PARTNER_RE.test(id)) return json({ error: "unknown partner" }, 400, cors);
     await env.DELIVERIES.delete(partnerKey(id));
     return json({ ok: true }, 200, cors);
   }
@@ -1026,7 +1055,7 @@ async function handleCall(request, env, ctx, cors) {
     const from = String(body.invite || "");
     // which partner sent them, if any. The fee is paid per booking, so
     // this is the number that decides what anybody is owed.
-    const ref = TRANSFER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
+    const ref = PARTNER_RE.test(String(body.ref || "")) ? String(body.ref) : "";
 
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
