@@ -90,8 +90,12 @@ export default {
     const origin = request.headers.get("Origin") || "";
     const cors = {
       "Access-Control-Allow-Origin": ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0],
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type"
+      "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+      // uploads carry the key and the file type as headers, and a header
+      // the browser has not been told about turns into a blocked request
+      // that reports itself as a dropped connection
+      "Access-Control-Allow-Headers": "Content-Type, X-Studio-Key, X-File-Type",
+      "Access-Control-Max-Age": "86400"
     };
 
     if (request.method === "OPTIONS") {
