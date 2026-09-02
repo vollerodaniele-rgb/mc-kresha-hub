@@ -119,7 +119,7 @@ export default {
       if (url.pathname === "/delivery") return listDelivery(url, env, cors);
       if (url.pathname === "/file") return serveDelivery(url, env);
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
-      if (url.pathname === "/transfer/file") return serveTransferFile(url, env);
+      if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       return listIdeas(url, env, cors);
     }
@@ -860,6 +860,29 @@ async function sweepExpiredTransfers(env) {
   }
 }
 
+/* Notes that a file was actually fetched, so "did they get it" stops
+   being a question you have to ask them.
+
+   Counted when the file starts being sent, not when it finishes, since
+   nothing tells us about the finish. A cancelled download still counts,
+   which is the honest limit of doing this without a tracker. */
+async function noteDownload(env, id, name) {
+  try {
+    const meta = await readMeta(env, id);
+    if (!meta) return;
+
+    if (!meta.downloads || typeof meta.downloads !== "object") meta.downloads = {};
+    const before = meta.downloads[name] || { count: 0, last: "" };
+    meta.downloads[name] = { count: before.count + 1, last: new Date().toISOString() };
+
+    await env.DELIVERIES.put(metaKey(id), JSON.stringify(meta), {
+      httpMetadata: { contentType: "application/json" }
+    });
+  } catch (err) {
+    console.log("could not note a download:", String(err));
+  }
+}
+
 /* What the person holding the link sees. No key, by design: the link
    is the permission. */
 async function readTransfer(url, env, cors) {
@@ -874,10 +897,11 @@ async function readTransfer(url, env, cors) {
   if (transferIsGone(meta)) return json({ error: "gone" }, 404, cors);
 
   const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX + id + "/files/", limit: 500 });
-  const files = listed.objects.map((o) => ({
-    name: o.key.split("/").pop(),
-    size: o.size
-  })).sort((a, b) => a.name.localeCompare(b.name));
+  const taken = meta.downloads || {};
+  const files = listed.objects.map((o) => {
+    const name = o.key.split("/").pop();
+    return { name, size: o.size, downloaded: !!taken[name] };
+  }).sort((a, b) => a.name.localeCompare(b.name));
 
   return json({
     title: meta.title || "",
@@ -887,7 +911,7 @@ async function readTransfer(url, env, cors) {
   }, 200, cors);
 }
 
-async function serveTransferFile(url, env) {
+async function serveTransferFile(url, env, ctx) {
   if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
 
   const id = String(url.searchParams.get("id") || "");
@@ -900,6 +924,9 @@ async function serveTransferFile(url, env) {
 
   const object = await env.DELIVERIES.get(transferFileKey(id, name));
   if (!object) return new Response("not found", { status: 404 });
+
+  // noted after the reply is on its way, so nobody waits on bookkeeping
+  if (ctx) ctx.waitUntil(noteDownload(env, id, name));
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
@@ -924,6 +951,11 @@ async function listTransfers(request, url, env, cors) {
     const meta = await readMeta(env, id);
     if (!meta) continue;
     const files = listed.objects.filter((o) => o.key.startsWith(TRANSFER_PREFIX + id + "/files/"));
+    const taken = meta.downloads || {};
+    const names = files.map((o) => o.key.split("/").pop());
+    const got = names.filter((n) => taken[n]);
+    const last = got.map((n) => taken[n].last).sort().pop() || "";
+
     transfers.push({
       id,
       title: meta.title || "",
@@ -931,7 +963,9 @@ async function listTransfers(request, url, env, cors) {
       expires: meta.expires || "",
       expired: transferIsGone(meta),
       files: files.length,
-      size: files.reduce((t, o) => t + o.size, 0)
+      size: files.reduce((t, o) => t + o.size, 0),
+      downloaded: got.length,
+      lastDownload: last
     });
   }
 
