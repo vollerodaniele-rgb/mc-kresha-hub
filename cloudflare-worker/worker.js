@@ -121,6 +121,8 @@ export default {
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
+      if (url.pathname === "/call/slots") return openSlots(env, cors);
+      if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
     }
 
@@ -148,6 +150,10 @@ export default {
 
     if (new URL(request.url).pathname.startsWith("/transfer/")) {
       return handleTransfer(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname.startsWith("/call/")) {
+      return handleCall(request, env, ctx, cors);
     }
 
     let data;
@@ -710,6 +716,218 @@ async function serveDelivery(url, env) {
   headers.set("Access-Control-Allow-Origin", "*");
 
   return new Response(object.body, { headers });
+}
+
+/* ============ BOOKING A CALL ============ */
+/* The same idea as a client picking a shoot date, pointed at someone
+   who is not a client yet. You offer times, they take one, and it
+   disappears so nobody can take it twice.
+
+   Slots and bookings live in R2 rather than in a repo, because a
+   booking carries a stranger's name and email and the repos are
+   public. */
+
+const SLOTS_KEY = "_call/slots.json";
+const bookingKey = (id) => "_call/booked/" + id + ".json";
+const slotId = (date, time) => date + "-" + String(time).replace(":", "");
+
+async function readSlots(env) {
+  const object = await env.DELIVERIES.get(SLOTS_KEY);
+  if (!object) return { slots: [], minutes: 20, note: "" };
+  try {
+    const data = await object.json();
+    return {
+      slots: Array.isArray(data.slots) ? data.slots : [],
+      minutes: Number(data.minutes) || 20,
+      note: String(data.note || "")
+    };
+  } catch {
+    return { slots: [], minutes: 20, note: "" };
+  }
+}
+
+async function readBookings(env) {
+  const listed = await env.DELIVERIES.list({ prefix: "_call/booked/", limit: 1000 });
+  const out = [];
+  for (const o of listed.objects) {
+    const object = await env.DELIVERIES.get(o.key);
+    if (!object) continue;
+    try {
+      out.push(await object.json());
+    } catch { /* a broken record should not hide the rest */ }
+  }
+  return out.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+}
+
+/* A slot is gone once it is taken or once it is in the past. Nobody
+   should be offered yesterday. */
+function slotIsOpen(slot, booked) {
+  const id = slotId(slot.date, slot.time);
+  if (booked.some((b) => b.id === id)) return false;
+  return Date.parse(slot.date + "T23:59:59Z") >= Date.now();
+}
+
+async function openSlots(env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const { slots, minutes, note } = await readSlots(env);
+  const booked = await readBookings(env);
+  const open = slots
+    .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && slotIsOpen(s, booked))
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+
+  return json({ slots: open, minutes, note }, 200, cors);
+}
+
+async function listCalls(request, url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
+
+  const { slots, minutes, note } = await readSlots(env);
+  return json({ booked: await readBookings(env), slots, minutes, note }, 200, cors);
+}
+
+async function handleCall(request, env, ctx, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const action = new URL(request.url).pathname.slice("/call/".length);
+
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "invalid JSON" }, 400, cors);
+  }
+
+  /* Booking is open to anyone, which is the point. It cannot mail an
+     address of the caller's choosing with anything they wrote, and it
+     can only ever take a slot that was deliberately offered. */
+  if (action === "book") {
+    const date = String(body.date || "");
+    const time = String(body.time || "");
+    const name = String(body.name || "").trim().slice(0, 60);
+    const email = String(body.email || "").trim().slice(0, 120);
+    const about = String(body.note || "").trim().slice(0, 500);
+
+    if (body.website) return json({ ok: true }, 201, cors);
+    if (!name) return json({ error: "no name" }, 400, cors);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return json({ error: "bad email" }, 400, cors);
+
+    const { slots, minutes } = await readSlots(env);
+    const booked = await readBookings(env);
+    const slot = slots.find((s) => s.date === date && s.time === time);
+    if (!slot || !slotIsOpen(slot, booked)) {
+      return json({ error: "that time has just gone, pick another" }, 409, cors);
+    }
+
+    const record = {
+      id: slotId(date, time),
+      date, time, name, email, note: about,
+      minutes,
+      at: new Date().toISOString()
+    };
+
+    await env.DELIVERIES.put(bookingKey(record.id), JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
+    });
+
+    ctx.waitUntil(confirmCall(env, record));
+    return json({ ok: true }, 201, cors);
+  }
+
+  // everything below changes what is offered, so it needs the key
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  if (action === "offer") {
+    const slots = (Array.isArray(body.slots) ? body.slots : [])
+      .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && /^\d{1,2}:\d{2}$/.test(s.time))
+      .slice(0, 40)
+      .map((s) => ({ date: s.date, time: s.time }));
+
+    await env.DELIVERIES.put(SLOTS_KEY, JSON.stringify({
+      slots,
+      minutes: Math.min(180, Math.max(10, Number(body.minutes) || 20)),
+      note: String(body.note || "").slice(0, 300)
+    }), { httpMetadata: { contentType: "application/json" } });
+
+    return json({ ok: true, slots: slots.length }, 200, cors);
+  }
+
+  if (action === "cancel") {
+    const id = String(body.id || "");
+    if (!/^[0-9-]{6,20}$/.test(id)) return json({ error: "unknown booking" }, 400, cors);
+    await env.DELIVERIES.delete(bookingKey(id));
+    return json({ ok: true }, 200, cors);
+  }
+
+  return json({ error: "unknown action" }, 404, cors);
+}
+
+/* They get a confirmation with a calendar invitation, the same as a
+   client whose shoot is confirmed. He gets a Telegram. */
+async function confirmCall(env, record) {
+  await telegram(env, [
+    "<b>Call booked</b>",
+    "",
+    esc(record.name) + " &middot; " + esc(record.email),
+    esc(prettyDate(record.date)) + " at " + esc(record.time),
+    record.note ? "\n" + esc(record.note) : ""
+  ].filter(Boolean).join("\n"));
+
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) return;
+
+  const first = record.name.split(/\s+/)[0];
+  const subject = "Booked: " + prettyDate(record.date) + " at " + record.time;
+
+  const ics = buildIcs({
+    slug: "call",
+    date: record.date,
+    time: record.time,
+    location: "",
+    focus: "A call with Noir au Noir",
+    stamp: Date.now()
+  });
+
+  const html = mailHtml({
+    headline: "We are on",
+    lead: (first ? esc(first) + ", that" : "That") +
+      " time is yours. The invitation is attached so it goes straight into your calendar.",
+    detail: {
+      label: "The call",
+      big: prettyDate(record.date) + ", " + record.time,
+      sub: record.minutes + " minutes"
+    },
+    quote: "",
+    action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
+    foot: "If something comes up, just reply to this and we will find another time."
+  });
+
+  const text = [subject, "", record.minutes + " minutes.", "",
+    "Reply to this if you need to move it.", "Noir au Noir"].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [record.email],
+        reply_to: REPLY_TO,
+        subject, html, text,
+        attachments: [{ filename: "call.ics", content: btoa(unescape(encodeURIComponent(ics))) }]
+      })
+    });
+    if (!res.ok) console.log("call confirmation failed:", res.status, await res.text());
+  } catch (err) {
+    console.log("call confirmation error:", String(err));
+  }
 }
 
 /* ============ SENDING FILES TO ANYONE ============ */
