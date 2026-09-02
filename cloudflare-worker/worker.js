@@ -1019,6 +1019,10 @@ async function handleCall(request, env, ctx, cors) {
     const name = String(body.name || "").trim().slice(0, 60);
     const email = String(body.email || "").trim().slice(0, 120);
     const about = String(body.note || "").trim().slice(0, 500);
+    // checked loosely on purpose: people write numbers every possible
+    // way, and refusing a real one is worse than storing an odd one
+    const rawPhone = String(body.phone || "").trim().slice(0, 30);
+    const phone = /^[+(\d][\d\s()./-]{5,}$/.test(rawPhone) ? rawPhone : "";
     const from = String(body.invite || "");
     // which partner sent them, if any. The fee is paid per booking, so
     // this is the number that decides what anybody is owed.
@@ -1027,6 +1031,8 @@ async function handleCall(request, env, ctx, cors) {
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return json({ error: "bad email" }, 400, cors);
+    // a call with no number is not a call anybody can make
+    if (!phone) return json({ error: "bad phone" }, 400, cors);
 
     // a personal link offers its own times; the open page offers the
     // shared ones. Either way the slot must still be free for everyone.
@@ -1052,7 +1058,7 @@ async function handleCall(request, env, ctx, cors) {
 
     const record = {
       id: slotId(date, time),
-      date, time, name, email, note: about,
+      date, time, name, email, phone, note: about,
       minutes,
       invite: from || "",
       ref,
@@ -1166,6 +1172,7 @@ async function confirmCall(env, record) {
     "<b>Call booked</b>",
     "",
     esc(record.name) + " &middot; " + esc(record.email),
+    record.phone ? "<b>" + esc(record.phone) + "</b>" : "",
     record.ref ? "Sent by a partner" : "",
     esc(prettyDate(record.date)) + " at " + esc(record.time),
     record.note ? "\n" + esc(record.note) : ""
@@ -1192,15 +1199,19 @@ async function confirmCall(env, record) {
     detail: {
       label: "The call",
       big: prettyDate(record.date) + ", " + record.time,
-      sub: record.minutes + " minutes"
+      // saying who rings whom, or both sides sit waiting for the other
+      sub: record.minutes + " minutes" +
+        (record.phone ? " &middot; I will call you on " + esc(record.phone) : "")
     },
     quote: "",
     action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
     foot: "If something comes up, just reply to this and we will find another time."
   });
 
-  const text = [subject, "", record.minutes + " minutes.", "",
-    "Reply to this if you need to move it.", "Noir au Noir"].join("\n");
+  const text = [subject, "",
+    record.minutes + " minutes.",
+    record.phone ? "I will call you on " + record.phone + "." : "",
+    "", "Reply to this if you need to move it.", "Noir au Noir"].filter(Boolean).join("\n");
 
   try {
     const res = await fetch(RESEND_ENDPOINT, {
