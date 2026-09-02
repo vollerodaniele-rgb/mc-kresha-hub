@@ -122,6 +122,7 @@ export default {
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       if (url.pathname === "/call/slots") return openSlots(env, cors);
+      if (url.pathname === "/call/invite") return readInvite(url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
     }
@@ -767,6 +768,71 @@ function slotIsOpen(slot, booked) {
   return Date.parse(slot.date + "T23:59:59Z") >= Date.now();
 }
 
+/* A personal invitation: one name, a few times, its own link.
+   The times are per invitation, but a booking is not. Every booking
+   lands in one ledger keyed by the date and hour, so the same slot can
+   be offered to three people and the first to take it removes it from
+   all three links. That is what stops you being double booked. */
+
+const inviteKey = (id) => "_call/invite/" + id + ".json";
+
+async function readInviteRecord(env, id) {
+  const object = await env.DELIVERIES.get(inviteKey(id));
+  if (!object) return null;
+  try {
+    return await object.json();
+  } catch {
+    return null;
+  }
+}
+
+async function readInvite(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const id = String(url.searchParams.get("id") || "");
+  if (!TRANSFER_RE.test(id)) return json({ error: "gone" }, 404, cors);
+
+  const invite = await readInviteRecord(env, id);
+  if (!invite) return json({ error: "gone" }, 404, cors);
+
+  // already used, so it says so rather than offering times again
+  if (invite.booked) {
+    return json({
+      name: invite.name || "",
+      minutes: invite.minutes || 20,
+      note: invite.note || "",
+      booked: invite.booked,
+      slots: []
+    }, 200, cors);
+  }
+
+  const taken = await readBookings(env);
+  const slots = (invite.slots || [])
+    .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && slotIsOpen(s, taken))
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+
+  return json({
+    name: invite.name || "",
+    minutes: invite.minutes || 20,
+    note: invite.note || "",
+    booked: null,
+    slots
+  }, 200, cors);
+}
+
+async function listInvites(env) {
+  const listed = await env.DELIVERIES.list({ prefix: "_call/invite/", limit: 1000 });
+  const out = [];
+  for (const o of listed.objects) {
+    const object = await env.DELIVERIES.get(o.key);
+    if (!object) continue;
+    try {
+      out.push(await object.json());
+    } catch { /* one broken invitation should not hide the rest */ }
+  }
+  return out.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
+}
+
 async function openSlots(env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
 
@@ -785,7 +851,11 @@ async function listCalls(request, url, env, cors) {
   if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
 
   const { slots, minutes, note } = await readSlots(env);
-  return json({ booked: await readBookings(env), slots, minutes, note }, 200, cors);
+  return json({
+    booked: await readBookings(env),
+    invites: await listInvites(env),
+    slots, minutes, note
+  }, 200, cors);
 }
 
 async function handleCall(request, env, ctx, cors) {
@@ -809,14 +879,30 @@ async function handleCall(request, env, ctx, cors) {
     const name = String(body.name || "").trim().slice(0, 60);
     const email = String(body.email || "").trim().slice(0, 120);
     const about = String(body.note || "").trim().slice(0, 500);
+    const from = String(body.invite || "");
 
     if (body.website) return json({ ok: true }, 201, cors);
     if (!name) return json({ error: "no name" }, 400, cors);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return json({ error: "bad email" }, 400, cors);
 
-    const { slots, minutes } = await readSlots(env);
+    // a personal link offers its own times; the open page offers the
+    // shared ones. Either way the slot must still be free for everyone.
+    let offered, minutes, invite = null;
+    if (from) {
+      if (!TRANSFER_RE.test(from)) return json({ error: "gone" }, 404, cors);
+      invite = await readInviteRecord(env, from);
+      if (!invite) return json({ error: "gone" }, 404, cors);
+      if (invite.booked) return json({ error: "that link has already been used" }, 409, cors);
+      offered = invite.slots || [];
+      minutes = invite.minutes || 20;
+    } else {
+      const shared = await readSlots(env);
+      offered = shared.slots;
+      minutes = shared.minutes;
+    }
+
     const booked = await readBookings(env);
-    const slot = slots.find((s) => s.date === date && s.time === time);
+    const slot = offered.find((s) => s.date === date && s.time === time);
     if (!slot || !slotIsOpen(slot, booked)) {
       return json({ error: "that time has just gone, pick another" }, 409, cors);
     }
@@ -825,6 +911,7 @@ async function handleCall(request, env, ctx, cors) {
       id: slotId(date, time),
       date, time, name, email, note: about,
       minutes,
+      invite: from || "",
       at: new Date().toISOString()
     };
 
@@ -832,12 +919,22 @@ async function handleCall(request, env, ctx, cors) {
       httpMetadata: { contentType: "application/json" }
     });
 
+    if (invite) {
+      invite.booked = { date, time, at: record.at, name, email };
+      await env.DELIVERIES.put(inviteKey(from), JSON.stringify(invite), {
+        httpMetadata: { contentType: "application/json" }
+      });
+    }
+
     ctx.waitUntil(confirmCall(env, record));
     return json({ ok: true }, 201, cors);
   }
 
-  // everything below changes what is offered, so it needs the key
+  // everything below changes what is offered, so it needs the key.
+  // Missing and wrong answer differently, the same as every other
+  // guarded route here.
   const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
   if (!await mayWrite(env, key)) {
     return json({ error: "that key cannot write to this studio" }, 403, cors);
   }
@@ -857,9 +954,60 @@ async function handleCall(request, env, ctx, cors) {
     return json({ ok: true, slots: slots.length }, 200, cors);
   }
 
+  if (action === "invite") {
+    const slots = (Array.isArray(body.slots) ? body.slots : [])
+      .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && /^\d{1,2}:\d{2}$/.test(s.time))
+      .slice(0, 6)
+      .map((s) => ({ date: s.date, time: s.time }));
+
+    if (!slots.length) return json({ error: "give it at least one time" }, 400, cors);
+
+    const id = newTransferId();
+    const invite = {
+      id,
+      name: String(body.name || "").trim().slice(0, 60),
+      note: String(body.note || "").trim().slice(0, 300),
+      minutes: Math.min(180, Math.max(10, Number(body.minutes) || 20)),
+      slots,
+      booked: null,
+      at: new Date().toISOString()
+    };
+
+    await env.DELIVERIES.put(inviteKey(id), JSON.stringify(invite), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true, id }, 201, cors);
+  }
+
+  if (action === "uninvite") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "unknown link" }, 400, cors);
+    await env.DELIVERIES.delete(inviteKey(id));
+    return json({ ok: true }, 200, cors);
+  }
+
   if (action === "cancel") {
     const id = String(body.id || "");
     if (!/^[0-9-]{6,20}$/.test(id)) return json({ error: "unknown booking" }, 400, cors);
+
+    // free the personal link too, or its slot is gone and it can never
+    // be used again
+    const gone = await env.DELIVERIES.get(bookingKey(id));
+    if (gone) {
+      try {
+        const record = await gone.json();
+        if (record.invite) {
+          const invite = await readInviteRecord(env, record.invite);
+          if (invite) {
+            invite.booked = null;
+            await env.DELIVERIES.put(inviteKey(record.invite), JSON.stringify(invite), {
+              httpMetadata: { contentType: "application/json" }
+            });
+          }
+        }
+      } catch { /* the booking still goes */ }
+    }
+
     await env.DELIVERIES.delete(bookingKey(id));
     return json({ ok: true }, 200, cors);
   }
