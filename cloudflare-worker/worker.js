@@ -2587,6 +2587,7 @@ async function mailSetup(env, cors) {
 
   let verdict = "unknown";
   let domains = [];
+  let readDomains = false;   // whether the list could be read at all
   try {
     const res = await fetch("https://api.resend.com/domains", {
       headers: { "Authorization": "Bearer " + key }
@@ -2599,6 +2600,7 @@ async function mailSetup(env, cors) {
         ? "cannot be read, which is normal for a sending only key"
         : "refused (" + res.status + ")";
     if (res.ok) {
+      readDomains = true;
       const body = await res.json();
       domains = (body.data || []).map((d) => d.name + ": " + d.status);
     }
@@ -2616,9 +2618,15 @@ async function mailSetup(env, cors) {
     key: verdict,
     shape,
     verifiedDomains: domains,
+    /* An empty list means one of two very different things, and saying
+       the alarming one as fact was wrong: a sending only key is not
+       allowed to read domains at all, so it always comes back empty
+       however healthy the account is. */
     note: domains.length
       ? "Mail can go to anyone at a verified domain."
-      : "No domain verified, so Resend will only deliver to the address the account was opened with."
+      : readDomains
+        ? "No domain verified, so Resend will only deliver to the address the account was opened with."
+        : "This key cannot list domains, which is normal for a sending only key. It says nothing either way about whether a domain is verified."
   }, 200, cors);
 }
 
