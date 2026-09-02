@@ -821,6 +821,46 @@ async function handleTransfer(request, env, cors) {
     return json({ ok: true, name }, 201, cors);
   }
 
+  /* Mails the link to whoever should have it. Same rule as every other
+     route that writes to an address the caller supplies: the key was
+     already checked above. */
+  if (action === "send") {
+    const meta = await readMeta(env, id);
+    if (transferIsGone(meta)) return json({ error: "gone" }, 404, cors);
+    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+      return json({ error: "mail is not configured on this worker" }, 503, cors);
+    }
+
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "invalid JSON" }, 400, cors);
+    }
+
+    const to = String(body.to || "").trim().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
+
+    const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX + id + "/files/", limit: 500 });
+    if (!listed.objects.length) return json({ error: "there are no files behind that link yet" }, 400, cors);
+
+    const sent = await mailTransfer(env, {
+      to, id, meta,
+      count: listed.objects.length,
+      size: listed.objects.reduce((t, o) => t + o.size, 0)
+    });
+    if (!sent) return json({ error: "the mail service refused it" }, 502, cors);
+
+    // remembered, so the dashboard can say who already has it
+    meta.sent = (meta.sent || []).filter((s) => s.to !== to);
+    meta.sent.push({ to, at: new Date().toISOString() });
+    await env.DELIVERIES.put(metaKey(id), JSON.stringify(meta), {
+      httpMetadata: { contentType: "application/json" }
+    });
+
+    return json({ ok: true }, 200, cors);
+  }
+
   /* Killing a link really deletes the files. A transfer nobody can
      reach but that still costs storage is the worst of both. */
   if (action === "kill") {
@@ -857,6 +897,66 @@ async function sweepExpiredTransfers(env) {
     if (removed) console.log("swept " + removed + " expired transfer objects");
   } catch (err) {
     console.log("could not sweep transfers:", String(err));
+  }
+}
+
+/* The mail that carries a link. Built from the same shell as every
+   other studio mail, so a transfer looks like it came from the same
+   place as everything else. */
+async function mailTransfer(env, { to, id, meta, count, size }) {
+  const link = "https://clients.noiraunoir.com/t/#" + id;
+  const title = meta.title || "Files for you";
+  const mb = size / (1024 * 1024);
+  const readable = mb >= 1 ? mb.toFixed(1) + " MB" : Math.max(1, Math.round(size / 1024)) + " KB";
+
+  const html = mailHtml({
+    headline: title,
+    lead: meta.note
+      ? esc(meta.note)
+      : "There are files waiting for you. The link below opens them, and it does not expire in a week.",
+    detail: {
+      label: "Waiting for you",
+      big: count + (count === 1 ? " file" : " files"),
+      sub: readable
+    },
+    quote: "",
+    action: { text: count === 1 ? "Open the file" : "Open the files", url: link },
+    foot: meta.expires
+      ? "This link works until " + esc(meta.expires) + "."
+      : "The link stays open. Ask any time if you need it again."
+  });
+
+  const text = [
+    title, "",
+    meta.note || "There are files waiting for you.",
+    count + (count === 1 ? " file" : " files") + ", " + readable, "",
+    link, "",
+    meta.expires ? "This link works until " + meta.expires + "." : "",
+    "Noir au Noir"
+  ].filter(Boolean).join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [to],
+        reply_to: REPLY_TO,
+        subject: title,
+        html,
+        text
+      })
+    });
+    if (!res.ok) console.log("transfer mail failed:", res.status, await res.text());
+    else console.log("transfer mail sent for " + id);
+    return res.ok;
+  } catch (err) {
+    console.log("transfer mail error:", String(err));
+    return false;
   }
 }
 
@@ -965,7 +1065,8 @@ async function listTransfers(request, url, env, cors) {
       files: files.length,
       size: files.reduce((t, o) => t + o.size, 0),
       downloaded: got.length,
-      lastDownload: last
+      lastDownload: last,
+      sent: meta.sent || []
     });
   }
 
