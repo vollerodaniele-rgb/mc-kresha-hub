@@ -83,7 +83,18 @@ const ALLOWED_ORIGINS = [
 export default {
   /* Runs on the cron in wrangler.toml, not on a request. */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(healthCheck(env, new Date(event.scheduledTime).getUTCDay() === 1));
+    const fired = new Date(event.scheduledTime);
+
+    /* Crons are UTC and Gent is not, so the brief fires on two of them
+       and only speaks on the one where it is actually eight o'clock
+       there. That is 06:00 UTC in summer and 07:00 in winter, and it
+       stays right across the changeover without anybody editing it. */
+    if (hourThere(SHOOT_TZ) === 8) {
+      ctx.waitUntil(morningBrief(env, fired.getUTCDay() === 1));
+      return;
+    }
+
+    ctx.waitUntil(healthCheck(env, fired.getUTCDay() === 1));
     // an expired transfer is unreachable but still costs storage, so
     // it is swept rather than left to accumulate forever
     ctx.waitUntil(sweepExpiredTransfers(env));
@@ -987,7 +998,7 @@ const asClock = (mins) =>
 function todayThere(tz) {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit"
-  }).format(new Date());
+  }).format(new Date(Date.now()));
 }
 
 function addDays(iso, n) {
@@ -2740,6 +2751,223 @@ function prettyDate(iso) {
     ["January","February","March","April","May","June","July",
      "August","September","October","November","December"][d.getUTCMonth()] + " " +
     d.getUTCFullYear();
+}
+
+/* ============ THE MORNING BRIEF ============ */
+/* One message at eight, saying what needs him today.
+
+   The system knows a great deal that nobody looks at: a call at
+   eleven, a number left on Sunday that has not been rung, a proposal
+   opened four times and never accepted, a month that is two thirds
+   gone with three reels delivered. All of it sits there until he
+   thinks to open the dashboard.
+
+   Silent when there is nothing, like the health check, so a quiet
+   morning reads as a quiet morning. Once a week it says so out loud,
+   because a brief that has silently stopped working looks exactly the
+   same as a week with nothing in it. */
+
+const BRIEF_REPO = "vollerodaniele-rgb/clients";
+const BRIEF_RESERVED = ["admin", "assets", "data", "_template", "p", "proposals",
+                        "_proposal", "i", "boxes", "_box", "uploads"];
+
+function hourThere(tz) {
+  return Number(new Intl.DateTimeFormat("en-GB", {
+    timeZone: tz, hour: "2-digit", hour12: false
+  }).format(new Date(Date.now())));
+}
+
+/* Every client's plan, read the same way the dashboard reads them, so
+   the brief can never disagree with what a client is being shown. */
+async function clientPlans(env) {
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box"
+  };
+
+  const out = [];
+  try {
+    const listed = await fetch(`https://api.github.com/repos/${BRIEF_REPO}/contents/data`, { headers });
+    if (!listed.ok) return out;
+
+    const names = (await listed.json())
+      .filter((f) => f.type === "file" && f.name.endsWith(".json") && !f.name.startsWith("_"))
+      .map((f) => f.name.replace(/\.json$/, ""))
+      .filter((n) => !BRIEF_RESERVED.includes(n));
+
+    for (const name of names) {
+      const res = await fetch(
+        `https://raw.githubusercontent.com/${BRIEF_REPO}/main/data/${encodeURIComponent(name)}.json`,
+        { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN } }
+      );
+      if (res.ok) out.push({ name, plan: await res.json() });
+    }
+  } catch (err) {
+    console.log("brief could not read the clients:", String(err));
+  }
+  return out;
+}
+
+/* Which proposals have been opened, and which of those were accepted.
+   Both are already recorded as issues, so this only has to read. */
+async function proposalState(env) {
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box"
+  };
+
+  const out = [];
+  try {
+    const res = await fetch(
+      `https://api.github.com/repos/${BRIEF_REPO}/issues?labels=seen&state=all&per_page=100`,
+      { headers }
+    );
+    if (!res.ok) return out;
+
+    const accepted = await fetch(
+      `https://api.github.com/repos/${BRIEF_REPO}/issues?labels=accepted&state=all&per_page=100`,
+      { headers }
+    );
+    const taken = accepted.ok
+      ? new Set((await accepted.json()).flatMap((i) =>
+          (i.labels || []).map((l) => (l.name || l)).filter((n) => String(n).startsWith("proposal:"))))
+      : new Set();
+
+    for (const issue of await res.json()) {
+      const slug = (issue.labels || [])
+        .map((l) => String(l.name || l))
+        .find((n) => n.startsWith("proposal:"));
+      if (!slug || taken.has(slug)) continue;
+
+      const body = issue.body || "";
+      out.push({
+        brand: String(issue.title || "").replace(/^Seen:\s*/, ""),
+        opens: Number((body.match(/Opened (\d+) time/) || [])[1] || 0),
+        lastOpen: (body.match(/Last on (\S+)/) || [])[1] || ""
+      });
+    }
+  } catch (err) {
+    console.log("brief could not read the proposals:", String(err));
+  }
+  return out;
+}
+
+const daysSince = (iso) => {
+  const then = Date.parse(iso || "");
+  return then ? Math.floor((Date.now() - then) / 86400000) : 0;
+};
+
+async function morningBrief(env, sayNothing) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+
+  const today = todayThere(SHOOT_TZ);
+  const soon = addDays(today, 3);
+  const lines = [];
+
+  /* --- what is happening --- */
+  const coming = [];
+
+  if (env.DELIVERIES) {
+    for (const b of await readBookings(env)) {
+      if (b.date >= today && b.date <= soon) {
+        coming.push({
+          date: b.date, time: b.time,
+          what: "Call, " + b.name + (b.phone ? ", " + b.phone : "")
+        });
+      }
+    }
+  }
+
+  const plans = await clientPlans(env);
+  for (const { plan } of plans) {
+    const shoot = plan.nextShoot || {};
+    if (shoot.date && shoot.date >= today && shoot.date <= soon) {
+      coming.push({
+        date: shoot.date, time: shoot.time || "",
+        what: "Shoot, " + (plan.name || "a client") + (shoot.location ? ", " + shoot.location : "")
+      });
+    }
+  }
+
+  coming.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+  if (coming.length) {
+    lines.push("<b>Next three days</b>");
+    for (const c of coming) {
+      const when = c.date === today ? "Today" : c.date === addDays(today, 1) ? "Tomorrow" : prettyDate(c.date);
+      lines.push(esc(when + (c.time ? " " + c.time : "") + " · " + c.what));
+    }
+  }
+
+  /* --- what is waiting on him --- */
+  const waiting = [];
+
+  if (env.DELIVERIES) {
+    for (const ask of await readAsks(env)) {
+      if (ask.done) continue;
+      const age = daysSince(ask.at);
+      waiting.push("Ring " + ask.name + " on " + ask.phone +
+        (age ? " (" + age + " day" + (age === 1 ? "" : "s") + " ago)" : " (today)"));
+    }
+  }
+
+  for (const p of await proposalState(env)) {
+    if (!p.opens) continue;
+    const age = daysSince(p.lastOpen);
+    waiting.push(p.brand + " opened the proposal " + p.opens + " time" + (p.opens === 1 ? "" : "s") +
+      ", last " + (age ? age + " day" + (age === 1 ? "" : "s") + " ago" : "today") + ", not accepted");
+  }
+
+  if (env.DELIVERIES) {
+    const listed = await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX, limit: 1000 });
+    for (const o of listed.objects) {
+      if (!o.key.endsWith("/meta.json")) continue;
+      try {
+        const meta = await (await env.DELIVERIES.get(o.key)).json();
+        if (!meta.sent || !meta.sent.length) continue;
+        if (Object.keys(meta.downloads || {}).length) continue;
+        const age = daysSince(meta.sent[meta.sent.length - 1].at);
+        if (age < 2) continue;   // give them a day or two before nagging
+        waiting.push((meta.title || "A transfer") + " sent " + age + " days ago, nothing downloaded");
+      } catch { /* one unreadable transfer should not stop the brief */ }
+    }
+  }
+
+  if (waiting.length) {
+    if (lines.length) lines.push("");
+    lines.push("<b>Waiting on you</b>");
+    for (const w of waiting) lines.push(esc(w));
+  }
+
+  /* --- months running out of road --- */
+  const behind = [];
+  const dayOfMonth = Number(today.slice(8));
+  const inMonth = new Date(Date.UTC(Number(today.slice(0, 4)), Number(today.slice(5, 7)), 0)).getUTCDate();
+  const left = inMonth - dayOfMonth;
+
+  if (left <= 10) {
+    for (const { plan } of plans) {
+      const month = (plan.months || []).find((m) => m.status === "active");
+      if (!month || !month.reels || !month.reels.total) continue;
+      if (month.reels.done >= month.reels.total) continue;
+      behind.push((plan.name || "A client") + ": " + month.reels.done + " of " + month.reels.total +
+        " reels, " + left + " day" + (left === 1 ? "" : "s") + " of the month left");
+    }
+  }
+
+  if (behind.length) {
+    if (lines.length) lines.push("");
+    lines.push("<b>Running out of month</b>");
+    for (const b of behind) lines.push(esc(b));
+  }
+
+  if (!lines.length) {
+    if (sayNothing) await telegram(env, "<b>Nothing needs you today.</b>\n\nNo shoots or calls in the next three days, nobody waiting on a reply, and no month behind.");
+    return;
+  }
+
+  await telegram(env, ["<b>This morning</b>", ""].concat(lines).join("\n"));
 }
 
 /* ============ HEALTH CHECK ============ */

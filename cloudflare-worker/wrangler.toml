@@ -3,10 +3,16 @@ main = "worker.js"
 compatibility_date = "2026-08-01"
 workers_dev = true
 
-# 05:00 UTC is 07:00 in Gent in summer, 06:00 in winter. Cloudflare
-# crons are always UTC, so this drifts by an hour and that is fine.
+# 05:00 UTC is the health check. It is 07:00 in Gent in summer and
+# 06:00 in winter; drifting by an hour does not matter for a check
+# that is silent unless something is wrong.
+#
+# 06:00 and 07:00 are the morning brief, which does matter: one of the
+# two is 08:00 in Gent whatever the time of year, and the worker only
+# speaks on that one. Cloudflare crons are always UTC, so this is how
+# a fixed local hour is held across the changeover.
 [triggers]
-crons = ["0 5 * * *"]
+crons = ["0 5 * * *", "0 6 * * *", "0 7 * * *"]
 
 # Finished work for clients. Private: nothing in here has a public
 # address, the worker hands out links that expire instead.
