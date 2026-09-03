@@ -1226,6 +1226,41 @@ async function handleCall(request, env, ctx, cors) {
     return json({ ok: true, id }, 201, cors);
   }
 
+  /* Sending the invitation rather than copying it into something else.
+     The address is his to type, so this cannot be used to mail a
+     stranger, and what it says is ours: only the times and the link. */
+  if (action === "send") {
+    const id = String(body.id || "");
+    if (!TRANSFER_RE.test(id)) return json({ error: "unknown link" }, 400, cors);
+
+    const invite = await readInviteRecord(env, id);
+    if (!invite) return json({ error: "gone" }, 404, cors);
+    if (invite.booked) return json({ error: "that link has already been used" }, 409, cors);
+
+    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+      return json({ error: "mail is not configured on this worker" }, 503, cors);
+    }
+
+    const to = String(body.to || "").trim().slice(0, 120);
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
+
+    // the hours still free, so nobody is offered one that has gone
+    const taken = await readBookings(env);
+    const open = (invite.slots || []).filter((s) => slotIsOpen(s, taken));
+    if (!open.length) return json({ error: "every time on that link has gone" }, 409, cors);
+
+    const sent = await mailInvite(env, { to, id, invite, slots: open });
+    if (!sent) return json({ error: "the mail service refused it" }, 502, cors);
+
+    invite.sent = (invite.sent || []).filter((s) => s.to !== to);
+    invite.sent.push({ to, at: new Date().toISOString() });
+    await env.DELIVERIES.put(inviteKey(id), JSON.stringify(invite), {
+      httpMetadata: { contentType: "application/json" }
+    });
+
+    return json({ ok: true, sent: open.length }, 200, cors);
+  }
+
   if (action === "uninvite") {
     const id = String(body.id || "");
     if (!TRANSFER_RE.test(id)) return json({ error: "unknown link" }, 400, cors);
@@ -1411,6 +1446,74 @@ async function confirmAsk(env, record) {
     if (!res.ok) console.log("call back note failed:", res.status, await res.text());
   } catch (err) {
     console.log("call back note error:", String(err));
+  }
+}
+
+/* The invitation itself, in an email. The times are listed in the body
+   because a link that says nothing is a link nobody opens, and the
+   button carries the same three hours behind it. */
+async function mailInvite(env, { to, id, invite, slots }) {
+  const link = "https://clients.noiraunoir.com/call/#" + id;
+  const first = String(invite.name || "").split(/\s+/)[0];
+  const minutes = invite.minutes || 20;
+  const subject = first ? first + ", pick a time" : "Pick a time";
+
+  const when = slots
+    .map((s) => prettyDate(s.date) + " at " + s.time)
+    .join("<br>");
+
+  const html = mailHtml({
+    headline: subject,
+    lead: (invite.note ? esc(invite.note) + " " : "") +
+      "Whichever of these suits you, tap it and it is booked. Nothing to prepare.",
+    detail: {
+      label: slots.length === 1 ? "The time on offer" : "Times on offer",
+      big: minutes + " minutes",
+      // already markup, so it is passed through rather than escaped
+      subHtml: when
+    },
+    quote: "",
+    action: { text: "Pick a time", url: link },
+    foot: "If none of them work, reply to this and say when does."
+  });
+
+  /* Built without a filter on purpose. Dropping empty strings takes
+     the blank lines with them, and the plain text version arrives as
+     one unbroken block. */
+  const text = [
+    subject,
+    "",
+    ...(invite.note ? [invite.note, ""] : []),
+    minutes + " minutes.",
+    "",
+    ...slots.map((s) => prettyDate(s.date) + " at " + s.time),
+    "",
+    link,
+    "",
+    "If none of them work, reply and say when does.",
+    "Noir au Noir"
+  ].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [to],
+        reply_to: REPLY_TO,
+        subject, html, text
+      })
+    });
+    if (!res.ok) console.log("invite mail failed:", res.status, await res.text());
+    else console.log("invite mail sent for " + id);
+    return res.ok;
+  } catch (err) {
+    console.log("invite mail error:", String(err));
+    return false;
   }
 }
 
@@ -2399,8 +2502,14 @@ function mailHtml({ headline, lead, detail, quote, action, foot }) {
   <tr><td style="padding:26px 36px 0 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
       <tr><td style="padding:20px 22px 6px 22px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">${esc(detail.label)}</td></tr>
-      <tr><td style="padding:0 22px ${detail.sub ? "4px" : "20px"} 22px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(detail.big)}</td></tr>
-      ${detail.sub ? `<tr><td style="padding:0 22px 20px 22px;${cell}font-size:14px;color:#9a9a9a;">${esc(detail.sub)}</td></tr>` : ""}
+      <tr><td style="padding:0 22px ${detail.sub || detail.subHtml ? "4px" : "20px"} 22px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(detail.big)}</td></tr>
+      ${/* `sub` is plain text and gets escaped. `subHtml` is for a list
+            built here, such as three dates on three lines, and is the
+            caller's job to keep safe. Never hand it anything typed by
+            somebody else. */ ""}
+      ${detail.sub || detail.subHtml
+        ? `<tr><td style="padding:0 22px 20px 22px;${cell}font-size:14px;line-height:1.7;color:#9a9a9a;">${detail.subHtml || esc(detail.sub)}</td></tr>`
+        : ""}
     </table>
   </td></tr>
   ${quote ? `<tr><td style="padding:22px 36px 0 36px;">
