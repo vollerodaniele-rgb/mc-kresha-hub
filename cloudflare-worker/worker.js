@@ -932,6 +932,117 @@ async function readSlots(env) {
   }
 }
 
+/* ============ OPENING HOURS ============ */
+/* The other way of offering a call. Instead of naming three times, he
+   names the hours he is willing to be rung between and lets them pick
+   a day and an hour out of that.
+
+   Nothing downstream changes: the hours are turned into the same list
+   of {date, time} that three hand picked slots produce, so booking,
+   double booking, invitations, confirmations and the agenda all carry
+   on working on one shape. */
+
+const HOURS_KEY = "_call/hours.json";
+
+const HOURS_DEFAULT = {
+  on: false,
+  days: [1, 2, 3, 4, 5],   // 0 is Sunday
+  from: "10:00",
+  to: "18:00",
+  minutes: 30,
+  notice: 12,              // hours of warning before the earliest one
+  ahead: 21,               // how far out they may book
+  note: ""
+};
+
+async function readHours(env) {
+  const object = await env.DELIVERIES.get(HOURS_KEY);
+  if (!object) return { ...HOURS_DEFAULT };
+  try {
+    const d = await object.json();
+    return {
+      on: !!d.on,
+      days: Array.isArray(d.days) && d.days.length ? d.days.map(Number).filter((n) => n >= 0 && n <= 6) : HOURS_DEFAULT.days,
+      from: /^\d{1,2}:\d{2}$/.test(d.from) ? d.from : HOURS_DEFAULT.from,
+      to: /^\d{1,2}:\d{2}$/.test(d.to) ? d.to : HOURS_DEFAULT.to,
+      minutes: Math.min(180, Math.max(10, Number(d.minutes) || HOURS_DEFAULT.minutes)),
+      notice: Math.min(336, Math.max(0, Number(d.notice) ?? HOURS_DEFAULT.notice)),
+      ahead: Math.min(120, Math.max(1, Number(d.ahead) || HOURS_DEFAULT.ahead)),
+      note: String(d.note || "")
+    };
+  } catch {
+    return { ...HOURS_DEFAULT };
+  }
+}
+
+const asMinutes = (hhmm) => {
+  const [h, m] = String(hhmm).split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
+const asClock = (mins) =>
+  String(Math.floor(mins / 60)).padStart(2, "0") + ":" + String(mins % 60).padStart(2, "0");
+
+/* The date in Brussels right now, which is not the date in UTC for two
+   hours of every summer evening. */
+function todayThere(tz) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit"
+  }).format(new Date());
+}
+
+function addDays(iso, n) {
+  const d = new Date(iso + "T12:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+
+/* Every hour inside the window that is far enough away, on a day he
+   works, and not already taken. Capped so a wide window over a long
+   horizon cannot produce an answer nobody can use. */
+function hoursToSlots(hours, booked) {
+  if (!hours.on) return [];
+
+  const start = asMinutes(hours.from);
+  const end = asMinutes(hours.to);
+  if (end <= start) return [];
+
+  const earliest = Date.now() + hours.notice * 3600000;
+  const first = todayThere(SHOOT_TZ);
+  const out = [];
+
+  for (let n = 0; n <= hours.ahead && out.length < 400; n++) {
+    const date = addDays(first, n);
+    const weekday = new Date(date + "T12:00:00Z").getUTCDay();
+    if (!hours.days.includes(weekday)) continue;
+
+    for (let m = start; m + hours.minutes <= end && out.length < 400; m += hours.minutes) {
+      const time = asClock(m);
+      if (zonedToUtc(date, time, SHOOT_TZ) < earliest) continue;
+      if (booked.some((b) => b.id === slotId(date, time))) continue;
+      out.push({ date, time });
+    }
+  }
+
+  return out;
+}
+
+/* What is on offer, whichever way he is offering it. Hours win when
+   they are switched on, because that is the deliberate act. */
+async function offeredNow(env) {
+  const hours = await readHours(env);
+  if (hours.on) {
+    const booked = await readBookings(env);
+    return {
+      mode: "hours",
+      slots: hoursToSlots(hours, booked),
+      minutes: hours.minutes,
+      note: hours.note
+    };
+  }
+  const fixed = await readSlots(env);
+  return { mode: "slots", slots: fixed.slots, minutes: fixed.minutes, note: fixed.note };
+}
+
 async function readBookings(env) {
   const listed = await env.DELIVERIES.list({ prefix: "_call/booked/", limit: 1000 });
   const out = [];
@@ -991,6 +1102,21 @@ async function readInvite(url, env, cors) {
     }, 200, cors);
   }
 
+  /* An invitation either names a few times or hands them the studio's
+     opening hours. Both come back as the same list, so the page that
+     draws it does not need to know which it was. */
+  if (invite.mode === "hours") {
+    const open = await offeredNow(env);
+    return json({
+      name: invite.name || "",
+      mode: "hours",
+      minutes: open.minutes,
+      note: invite.note || open.note || "",
+      booked: null,
+      slots: open.slots
+    }, 200, cors);
+  }
+
   const taken = await readBookings(env);
   const slots = (invite.slots || [])
     .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && slotIsOpen(s, taken))
@@ -998,6 +1124,7 @@ async function readInvite(url, env, cors) {
 
   return json({
     name: invite.name || "",
+    mode: "slots",
     minutes: invite.minutes || 20,
     note: invite.note || "",
     booked: null,
@@ -1021,13 +1148,20 @@ async function listInvites(env) {
 async function openSlots(env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
 
-  const { slots, minutes, note } = await readSlots(env);
+  const offered = await offeredNow(env);
+
+  // hours are computed already free; hand picked slots still need the
+  // taken and the past filtering out
+  if (offered.mode === "hours") {
+    return json({ mode: "hours", slots: offered.slots, minutes: offered.minutes, note: offered.note }, 200, cors);
+  }
+
   const booked = await readBookings(env);
-  const open = slots
+  const open = offered.slots
     .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && slotIsOpen(s, booked))
     .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 
-  return json({ slots: open, minutes, note }, 200, cors);
+  return json({ mode: "slots", slots: open, minutes: offered.minutes, note: offered.note }, 200, cors);
 }
 
 /* Someone who asked to be rung rather than taking an hour. Kept
@@ -1059,6 +1193,7 @@ async function listCalls(request, url, env, cors) {
     booked: await readBookings(env),
     asks: await readAsks(env),
     invites: await listInvites(env),
+    hours: await readHours(env),
     slots, minutes, note
   }, 200, cors);
 }
@@ -1107,10 +1242,17 @@ async function handleCall(request, env, ctx, cors) {
       invite = await readInviteRecord(env, from);
       if (!invite) return json({ error: "gone" }, 404, cors);
       if (invite.booked) return json({ error: "that link has already been used" }, 409, cors);
-      offered = invite.slots || [];
-      minutes = invite.minutes || 20;
+      if (invite.mode === "hours") {
+        // their link offers the studio's hours rather than a few times
+        const open = await offeredNow(env);
+        offered = open.slots;
+        minutes = open.minutes;
+      } else {
+        offered = invite.slots || [];
+        minutes = invite.minutes || 20;
+      }
     } else {
-      const shared = await readSlots(env);
+      const shared = await offeredNow(env);
       offered = shared.slots;
       minutes = shared.minutes;
     }
@@ -1201,21 +1343,59 @@ async function handleCall(request, env, ctx, cors) {
     return json({ ok: true, slots: slots.length }, 200, cors);
   }
 
+  /* Setting the hours he is willing to be rung between. Switching them
+     on is what makes them win over any hand picked times, so the
+     dashboard only ever has to change one thing. */
+  if (action === "hours") {
+    const hours = {
+      on: !!body.on,
+      days: Array.isArray(body.days) ? body.days.map(Number).filter((n) => n >= 0 && n <= 6) : HOURS_DEFAULT.days,
+      from: /^\d{1,2}:\d{2}$/.test(body.from) ? body.from : HOURS_DEFAULT.from,
+      to: /^\d{1,2}:\d{2}$/.test(body.to) ? body.to : HOURS_DEFAULT.to,
+      minutes: Math.min(180, Math.max(10, Number(body.minutes) || HOURS_DEFAULT.minutes)),
+      notice: Math.min(336, Math.max(0, Number(body.notice) ?? HOURS_DEFAULT.notice)),
+      ahead: Math.min(120, Math.max(1, Number(body.ahead) || HOURS_DEFAULT.ahead)),
+      note: String(body.note || "").slice(0, 300)
+    };
+
+    if (!hours.days.length) return json({ error: "pick at least one day" }, 400, cors);
+    if (asMinutes(hours.to) - asMinutes(hours.from) < hours.minutes) {
+      return json({ error: "that window is shorter than one call" }, 400, cors);
+    }
+
+    await env.DELIVERIES.put(HOURS_KEY, JSON.stringify(hours), {
+      httpMetadata: { contentType: "application/json" }
+    });
+
+    const booked = await readBookings(env);
+    return json({ ok: true, open: hoursToSlots(hours, booked).length }, 200, cors);
+  }
+
   if (action === "invite") {
+    // an invitation can hand them the opening hours instead of naming
+    // times, in which case it carries no times of its own
+    const useHours = body.mode === "hours";
+
     const slots = (Array.isArray(body.slots) ? body.slots : [])
       .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && /^\d{1,2}:\d{2}$/.test(s.time))
       .slice(0, 6)
       .map((s) => ({ date: s.date, time: s.time }));
 
-    if (!slots.length) return json({ error: "give it at least one time" }, 400, cors);
+    if (!useHours && !slots.length) return json({ error: "give it at least one time" }, 400, cors);
+
+    if (useHours) {
+      const hours = await readHours(env);
+      if (!hours.on) return json({ error: "switch your hours on first" }, 400, cors);
+    }
 
     const id = newTransferId();
     const invite = {
       id,
       name: String(body.name || "").trim().slice(0, 60),
       note: String(body.note || "").trim().slice(0, 300),
+      mode: useHours ? "hours" : "slots",
       minutes: Math.min(180, Math.max(10, Number(body.minutes) || 20)),
-      slots,
+      slots: useHours ? [] : slots,
       booked: null,
       at: new Date().toISOString()
     };
@@ -1244,9 +1424,17 @@ async function handleCall(request, env, ctx, cors) {
     const to = String(body.to || "").trim().slice(0, 120);
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
 
-    // the hours still free, so nobody is offered one that has gone
-    const taken = await readBookings(env);
-    const open = (invite.slots || []).filter((s) => slotIsOpen(s, taken));
+    /* Only times still free go in the mail. An hours invitation has no
+       times of its own, and listing four hundred of them would be
+       absurd, so it is checked for having any at all and the mail
+       describes the window instead. */
+    let open;
+    if (invite.mode === "hours") {
+      open = (await offeredNow(env)).slots;
+    } else {
+      const taken = await readBookings(env);
+      open = (invite.slots || []).filter((s) => slotIsOpen(s, taken));
+    }
     if (!open.length) return json({ error: "every time on that link has gone" }, 409, cors);
 
     const sent = await mailInvite(env, { to, id, invite, slots: open });
@@ -1458,16 +1646,24 @@ async function mailInvite(env, { to, id, invite, slots }) {
   const minutes = invite.minutes || 20;
   const subject = first ? first + ", pick a time" : "Pick a time";
 
-  const when = slots
-    .map((s) => prettyDate(s.date) + " at " + s.time)
-    .join("<br>");
+  /* A few named times are listed in full, because seeing them is what
+     makes somebody act. A whole window of opening hours is described
+     instead: nobody reads four hundred lines. */
+  const asHours = invite.mode === "hours";
+  const days = [...new Set(slots.map((s) => s.date))];
+  const when = asHours
+    ? esc(days.length + (days.length === 1 ? " day" : " days") + " to choose from, starting " +
+          prettyDate(days[0]))
+    : slots.map((s) => esc(prettyDate(s.date) + " at " + s.time)).join("<br>");
 
   const html = mailHtml({
     headline: subject,
     lead: (invite.note ? esc(invite.note) + " " : "") +
-      "Whichever of these suits you, tap it and it is booked. Nothing to prepare.",
+      (asHours
+        ? "Open the link, pick whichever day and hour suits you, and it is booked. Nothing to prepare."
+        : "Whichever of these suits you, tap it and it is booked. Nothing to prepare."),
     detail: {
-      label: slots.length === 1 ? "The time on offer" : "Times on offer",
+      label: asHours ? "When we are free" : slots.length === 1 ? "The time on offer" : "Times on offer",
       big: minutes + " minutes",
       // already markup, so it is passed through rather than escaped
       subHtml: when
@@ -1486,7 +1682,9 @@ async function mailInvite(env, { to, id, invite, slots }) {
     ...(invite.note ? [invite.note, ""] : []),
     minutes + " minutes.",
     "",
-    ...slots.map((s) => prettyDate(s.date) + " at " + s.time),
+    ...(asHours
+      ? [days.length + (days.length === 1 ? " day" : " days") + " to choose from, starting " + prettyDate(days[0])]
+      : slots.map((s) => prettyDate(s.date) + " at " + s.time)),
     "",
     link,
     "",
