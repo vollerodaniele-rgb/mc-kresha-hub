@@ -132,7 +132,7 @@ export default {
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
-      if (url.pathname === "/call/slots") return openSlots(env, cors);
+      if (url.pathname === "/call/slots") return openSlots(env, ctx, cors);
       if (url.pathname === "/call/invite") return readInvite(url, env, cors);
       if (url.pathname === "/ref") return readPartner(url, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
@@ -1156,8 +1156,47 @@ async function listInvites(env) {
   return out.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
 }
 
-async function openSlots(env, cors) {
+/* The main link, counted.
+
+   The personal links are used up: one booking and they are spent. This
+   one is not, which is the point of it. Send it to fifty people and
+   fifty can book, each taking a different hour out of the same
+   calendar until the calendar runs out.
+
+   So the only thing it was missing was knowing whether anybody opened
+   it. Counted the same way a partner page counts, which is to say
+   after the answer has already gone out. */
+const MAIN_KEY = "_call/main.json";
+
+async function readMain(env) {
+  const object = await env.DELIVERIES.get(MAIN_KEY);
+  if (!object) return { opens: 0, lastOpen: "" };
+  try {
+    const d = await object.json();
+    return { opens: Number(d.opens) || 0, lastOpen: String(d.lastOpen || "") };
+  } catch {
+    return { opens: 0, lastOpen: "" };
+  }
+}
+
+async function noteMainOpen(env) {
+  try {
+    const main = await readMain(env);
+    main.opens += 1;
+    main.lastOpen = new Date().toISOString();
+    await env.DELIVERIES.put(MAIN_KEY, JSON.stringify(main), {
+      httpMetadata: { contentType: "application/json" }
+    });
+  } catch (err) {
+    console.log("could not count a main link open:", String(err));
+  }
+}
+
+async function openSlots(env, ctx, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  // never in the way of the answer
+  if (ctx) ctx.waitUntil(noteMainOpen(env));
 
   const offered = await offeredNow(env);
 
@@ -1205,6 +1244,8 @@ async function listCalls(request, url, env, cors) {
     asks: await readAsks(env),
     invites: await listInvites(env),
     hours: await readHours(env),
+    // the link that never runs out, and how it is doing
+    main: await readMain(env),
     slots, minutes, note
   }, 200, cors);
 }
