@@ -129,6 +129,7 @@ export default {
       if (url.pathname === "/mail-setup") return mailSetup(env, cors);
       if (url.pathname === "/delivery") return listDelivery(url, env, cors);
       if (url.pathname === "/file") return serveDelivery(url, env);
+      if (url.pathname === "/thumb") return serveThumb(url, env);
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
@@ -160,6 +161,14 @@ export default {
 
     if (new URL(request.url).pathname === "/deliver") {
       return acceptDelivery(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname === "/thumb") {
+      return putThumb(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname === "/thumb/drop") {
+      return dropThumb(request, env, cors);
     }
 
     if (new URL(request.url).pathname.startsWith("/transfer/")) {
@@ -685,6 +694,94 @@ async function acceptDelivery(request, env, cors) {
     console.log("delivery upload failed:", String(err));
     return json({ error: "could not store it" }, 502, cors);
   }
+}
+
+/* ============ ONE FRAME PER POST ============ */
+/* A still from a piece, shown on the posting calendar so a month reads
+   as pictures rather than as dots. Small on purpose: it is a thumbnail
+   next to a caption, not a deliverable, and the finished films already
+   have their own place to live.
+
+   Kept apart from deliveries under _thumb/, because a client folder
+   cannot begin with an underscore. Served without a key, since the
+   portal that shows it has no key either. */
+
+const THUMB_MAX = 900 * 1024;
+const POST_RE = /^[A-Za-z0-9_-]{4,24}$/;
+
+const thumbKey = (client, post) => "_thumb/" + client + "/" + post + ".jpg";
+
+async function serveThumb(url, env) {
+  if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
+
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const post = String(url.searchParams.get("post") || "");
+  if (!CLIENT_RE.test(client) || !POST_RE.test(post)) {
+    return new Response("unknown frame", { status: 400 });
+  }
+
+  const object = await env.DELIVERIES.get(thumbKey(client, post));
+  if (!object) return new Response("not found", { status: 404 });
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  // shown in the page rather than downloaded, unlike a delivery
+  headers.set("Cache-Control", "public, max-age=86400");
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(object.body, { headers });
+}
+
+async function putThumb(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const url = new URL(request.url);
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const post = String(url.searchParams.get("post") || "");
+  const key = request.headers.get("X-Studio-Key") || "";
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client)) return json({ error: "unknown client" }, 400, cors);
+  if (!POST_RE.test(post)) return json({ error: "unknown post" }, 400, cors);
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  const type = request.headers.get("X-File-Type") || "";
+  if (!/^image\//.test(type)) return json({ error: "that is not a picture" }, 400, cors);
+
+  const size = Number(request.headers.get("Content-Length") || 0);
+  if (size > THUMB_MAX) {
+    return json({ error: "that frame is too big. It only needs to be a thumbnail." }, 413, cors);
+  }
+
+  try {
+    await env.DELIVERIES.put(thumbKey(client, post), request.body, {
+      httpMetadata: { contentType: type }
+    });
+    return json({ ok: true, post }, 201, cors);
+  } catch (err) {
+    console.log("thumb upload failed:", String(err));
+    return json({ error: "could not store it" }, 502, cors);
+  }
+}
+
+async function dropThumb(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const url = new URL(request.url);
+  const client = String(url.searchParams.get("client") || "").toLowerCase();
+  const post = String(url.searchParams.get("post") || "");
+  const key = request.headers.get("X-Studio-Key") || "";
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client) || !POST_RE.test(post)) return json({ error: "unknown frame" }, 400, cors);
+  if (!await mayWrite(env, key)) {
+    return json({ error: "that key cannot write to this studio" }, 403, cors);
+  }
+
+  await env.DELIVERIES.delete(thumbKey(client, post));
+  return json({ ok: true }, 200, cors);
 }
 
 async function listDelivery(url, env, cors) {
