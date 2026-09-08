@@ -878,15 +878,36 @@ async function freePartnerSlug(env, wanted) {
   return "";
 }
 
-async function readPartnerRecord(env, id) {
-  const object = await env.DELIVERIES.get(partnerKey(id));
+/* Reading records out of storage.
+
+   Eight functions did the same three things: fetch the key, parse it,
+   and treat anything unreadable as missing rather than as a crash.
+   Four more did it to every object under a prefix. That rule matters
+   and is easy to get subtly wrong in the ninth copy, so it lives in
+   one place. */
+async function readRecord(env, key) {
+  const object = await env.DELIVERIES.get(key);
   if (!object) return null;
   try {
     return await object.json();
   } catch {
+    // a record nobody can parse is a record nobody has
     return null;
   }
 }
+
+async function readAllRecords(env, prefix, limit = 1000) {
+  const listed = await env.DELIVERIES.list({ prefix, limit });
+  const out = [];
+  for (const o of listed.objects) {
+    const record = await readRecord(env, o.key);
+    // one broken record must never hide the rest
+    if (record) out.push(record);
+  }
+  return out;
+}
+
+const readPartnerRecord = (env, id) => readRecord(env, partnerKey(id));
 
 async function readPartner(url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
@@ -910,34 +931,30 @@ async function listPartners(request, url, env, cors) {
   const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
   if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
 
-  const listed = await env.DELIVERIES.list({ prefix: "_ref/", limit: 1000 });
+  const records = await readAllRecords(env, "_ref/");
   const booked = await readBookings(env);
   // a partner is owed for anyone they sent who wanted a call, whether
   // that person took an hour or left a number
   const asked = await readAsks(env);
 
-  const partners = [];
-  for (const o of listed.objects) {
-    const object = await env.DELIVERIES.get(o.key);
-    if (!object) continue;
-    try {
-      const p = await object.json();
-      const theirs = [
-        ...booked.filter((b) => b.ref === p.id),
-        ...asked.filter((a) => a.ref === p.id)
-      ];
-      partners.push({
-        id: p.id,
-        name: p.name || "",
-        discount: p.discount || "",
-        at: p.at || "",
-        opens: p.opens || 0,
-        lastOpen: p.lastOpen || "",
-        calls: theirs.length,
-        who: theirs.map((b) => ({ name: b.name, date: b.date || "", time: b.time || "" }))
-      });
-    } catch { /* one broken record should not hide the rest */ }
-  }
+  // an unreadable record is already dropped by readAllRecords, so
+  // there is nothing left here for a catch to do
+  const partners = records.map((p) => {
+    const theirs = [
+      ...booked.filter((b) => b.ref === p.id),
+      ...asked.filter((a) => a.ref === p.id)
+    ];
+    return {
+      id: p.id,
+      name: p.name || "",
+      discount: p.discount || "",
+      at: p.at || "",
+      opens: p.opens || 0,
+      lastOpen: p.lastOpen || "",
+      calls: theirs.length,
+      who: theirs.map((b) => ({ name: b.name, date: b.date || "", time: b.time || "" }))
+    };
+  });
 
   partners.sort((a, b) => String(b.at).localeCompare(String(a.at)));
   return json({ partners }, 200, cors);
@@ -1026,18 +1043,13 @@ const bookingKey = (id) => "_call/booked/" + id + ".json";
 const slotId = (date, time) => date + "-" + String(time).replace(":", "");
 
 async function readSlots(env) {
-  const object = await env.DELIVERIES.get(SLOTS_KEY);
-  if (!object) return { slots: [], minutes: 20, note: "" };
-  try {
-    const data = await object.json();
-    return {
-      slots: Array.isArray(data.slots) ? data.slots : [],
-      minutes: Number(data.minutes) || 20,
-      note: String(data.note || "")
-    };
-  } catch {
-    return { slots: [], minutes: 20, note: "" };
-  }
+  const data = await readRecord(env, SLOTS_KEY);
+  if (!data) return { slots: [], minutes: 20, note: "" };
+  return {
+    slots: Array.isArray(data.slots) ? data.slots : [],
+    minutes: Number(data.minutes) || 20,
+    note: String(data.note || "")
+  };
 }
 
 /* ============ OPENING HOURS ============ */
@@ -1064,11 +1076,9 @@ const HOURS_DEFAULT = {
 };
 
 async function readHours(env) {
-  const object = await env.DELIVERIES.get(HOURS_KEY);
-  if (!object) return { ...HOURS_DEFAULT };
-  try {
-    const d = await object.json();
-    return {
+  const d = await readRecord(env, HOURS_KEY);
+  if (!d) return { ...HOURS_DEFAULT };
+  return {
       on: !!d.on,
       days: Array.isArray(d.days) && d.days.length ? d.days.map(Number).filter((n) => n >= 0 && n <= 6) : HOURS_DEFAULT.days,
       from: /^\d{1,2}:\d{2}$/.test(d.from) ? d.from : HOURS_DEFAULT.from,
@@ -1076,11 +1086,8 @@ async function readHours(env) {
       minutes: Math.min(180, Math.max(10, Number(d.minutes) || HOURS_DEFAULT.minutes)),
       notice: Math.min(336, Math.max(0, Number(d.notice) ?? HOURS_DEFAULT.notice)),
       ahead: Math.min(120, Math.max(1, Number(d.ahead) || HOURS_DEFAULT.ahead)),
-      note: String(d.note || "")
-    };
-  } catch {
-    return { ...HOURS_DEFAULT };
-  }
+    note: String(d.note || "")
+  };
 }
 
 const asMinutes = (hhmm) => {
@@ -1152,15 +1159,7 @@ async function offeredNow(env) {
 }
 
 async function readBookings(env) {
-  const listed = await env.DELIVERIES.list({ prefix: "_call/booked/", limit: 1000 });
-  const out = [];
-  for (const o of listed.objects) {
-    const object = await env.DELIVERIES.get(o.key);
-    if (!object) continue;
-    try {
-      out.push(await object.json());
-    } catch { /* a broken record should not hide the rest */ }
-  }
+  const out = await readAllRecords(env, "_call/booked/");
   return out.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
 }
 
@@ -1180,15 +1179,7 @@ function slotIsOpen(slot, booked) {
 
 const inviteKey = (id) => "_call/invite/" + id + ".json";
 
-async function readInviteRecord(env, id) {
-  const object = await env.DELIVERIES.get(inviteKey(id));
-  if (!object) return null;
-  try {
-    return await object.json();
-  } catch {
-    return null;
-  }
-}
+const readInviteRecord = (env, id) => readRecord(env, inviteKey(id));
 
 async function readInvite(url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
@@ -1241,15 +1232,7 @@ async function readInvite(url, env, cors) {
 }
 
 async function listInvites(env) {
-  const listed = await env.DELIVERIES.list({ prefix: "_call/invite/", limit: 1000 });
-  const out = [];
-  for (const o of listed.objects) {
-    const object = await env.DELIVERIES.get(o.key);
-    if (!object) continue;
-    try {
-      out.push(await object.json());
-    } catch { /* one broken invitation should not hide the rest */ }
-  }
+  const out = await readAllRecords(env, "_call/invite/");
   return out.sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
 }
 
@@ -1266,14 +1249,10 @@ async function listInvites(env) {
 const MAIN_KEY = "_call/main.json";
 
 async function readMain(env) {
-  const object = await env.DELIVERIES.get(MAIN_KEY);
-  if (!object) return { opens: 0, lastOpen: "" };
-  try {
-    const d = await object.json();
-    return { opens: Number(d.opens) || 0, lastOpen: String(d.lastOpen || "") };
-  } catch {
-    return { opens: 0, lastOpen: "" };
-  }
+  const d = await readRecord(env, MAIN_KEY);
+  return d
+    ? { opens: Number(d.opens) || 0, lastOpen: String(d.lastOpen || "") }
+    : { opens: 0, lastOpen: "" };
 }
 
 async function noteMainOpen(env) {
@@ -1317,15 +1296,7 @@ async function openSlots(env, ctx, cors) {
 const askKey = (id) => "_call/asks/" + id + ".json";
 
 async function readAsks(env) {
-  const listed = await env.DELIVERIES.list({ prefix: "_call/asks/", limit: 1000 });
-  const out = [];
-  for (const o of listed.objects) {
-    const object = await env.DELIVERIES.get(o.key);
-    if (!object) continue;
-    try {
-      out.push(await object.json());
-    } catch { /* one broken request should not hide the rest */ }
-  }
+  const out = await readAllRecords(env, "_call/asks/");
   // newest first: the one to ring is the one that just came in
   return out.sort((a, b) => String(b.at).localeCompare(String(a.at)));
 }
@@ -1886,15 +1857,7 @@ function newTransferId() {
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function readMeta(env, id) {
-  const object = await env.DELIVERIES.get(metaKey(id));
-  if (!object) return null;
-  try {
-    return await object.json();
-  } catch {
-    return null;
-  }
-}
+const readMeta = (env, id) => readRecord(env, metaKey(id));
 
 function transferIsGone(meta) {
   if (!meta) return true;
