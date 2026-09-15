@@ -90,7 +90,12 @@ export default {
        there. That is 06:00 UTC in summer and 07:00 in winter, and it
        stays right across the changeover without anybody editing it. */
     if (hourThere(SHOOT_TZ) === 8) {
+      /* Two separate jobs on the same firing. Kept apart so a failure
+         in one cannot swallow the other: he still gets his brief if a
+         reminder cannot be sent, and they still get their reminder if
+         GitHub is down and the brief cannot be built. */
       ctx.waitUntil(morningBrief(env, fired.getUTCDay() === 1));
+      ctx.waitUntil(remindTomorrow(env));
       return;
     }
 
@@ -134,6 +139,7 @@ export default {
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       if (url.pathname === "/call/slots") return openSlots(env, ctx, cors);
+      if (url.pathname === "/call/booking") return readBookingToMove(url, env, cors);
       if (url.pathname === "/call/invite") return readInvite(url, env, cors);
       if (url.pathname === "/ref") return readPartner(url, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
@@ -1301,6 +1307,52 @@ async function readAsks(env) {
   return out.sort((a, b) => String(b.at).localeCompare(String(a.at)));
 }
 
+/* A booking found by the secret its reminder carries, rather than by
+   its id, which is only a date and an hour. */
+async function findBookingByMove(env, token) {
+  if (!TRANSFER_RE.test(token)) return null;
+  const all = await readBookings(env);
+  return all.find((b) => b.move === token) || null;
+}
+
+/* What the move link shows: the call they have, and the hours still
+   free. No key, because whoever is moving it has none. Their own name
+   and time come back; nothing about anybody else does. */
+async function readBookingToMove(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const booking = await findBookingByMove(env, String(url.searchParams.get("m") || ""));
+  if (!booking) return json({ error: "gone" }, 404, cors);
+
+  let offered, minutes = booking.minutes || 20;
+  if (booking.invite) {
+    const invite = await readInviteRecord(env, booking.invite);
+    if (invite && invite.mode === "hours") {
+      const open = await offeredNow(env);
+      offered = open.slots;
+      minutes = open.minutes;
+    } else {
+      offered = (invite && invite.slots) || [];
+    }
+  } else {
+    const open = await offeredNow(env);
+    offered = open.slots;
+    minutes = open.minutes;
+  }
+
+  const taken = await readBookings(env);
+  const slots = offered
+    .filter((s) => s && /^\d{4}-\d{2}-\d{2}$/.test(s.date) && slotIsOpen(s, taken))
+    .sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+
+  return json({
+    name: booking.name || "",
+    minutes,
+    booked: { date: booking.date, time: booking.time },
+    slots
+  }, 200, cors);
+}
+
 async function listCalls(request, url, env, cors) {
   if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
   const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
@@ -1389,6 +1441,11 @@ async function handleCall(request, env, ctx, cors) {
       minutes,
       invite: from || "",
       ref,
+      /* A secret of its own, so the reminder can offer to move it.
+         The id above is the date and the hour, which anybody could
+         guess, and a move link built on that would let a stranger
+         shift somebody else's call by typing a date. */
+      move: newTransferId(),
       at: new Date().toISOString()
     };
 
@@ -1405,6 +1462,69 @@ async function handleCall(request, env, ctx, cors) {
 
     ctx.waitUntil(confirmCall(env, record));
     return json({ ok: true }, 201, cors);
+  }
+
+  /* Moving a call they already have, from the link in the reminder.
+
+     Open to anyone holding the secret, because the person moving it
+     has no key and never will. Everything else is the same as booking:
+     the hour has to be one that was actually offered and is still
+     free, and the old one is given back in the same step so he is
+     never held against two. */
+  if (action === "move") {
+    const booking = await findBookingByMove(env, String(body.m || ""));
+    if (!booking) return json({ error: "gone" }, 404, cors);
+
+    const date = String(body.date || "");
+    const time = String(body.time || "");
+    if (date === booking.date && time === booking.time) {
+      return json({ error: "that is the time you already have" }, 409, cors);
+    }
+
+    // whatever they were offered in the first place, still free now
+    let offered;
+    if (booking.invite) {
+      const invite = await readInviteRecord(env, booking.invite);
+      offered = invite && invite.mode === "hours"
+        ? (await offeredNow(env)).slots
+        : (invite && invite.slots) || [];
+    } else {
+      offered = (await offeredNow(env)).slots;
+    }
+
+    const taken = await readBookings(env);
+    const slot = offered.find((s) => s.date === date && s.time === time);
+    if (!slot || !slotIsOpen(slot, taken)) {
+      return json({ error: "that time has just gone, pick another" }, 409, cors);
+    }
+
+    const moved = {
+      ...booking,
+      id: slotId(date, time),
+      date, time,
+      movedFrom: booking.date + " " + booking.time,
+      // a moved call has not been reminded about its new day yet
+      reminded: false
+    };
+
+    await env.DELIVERIES.put(bookingKey(moved.id), JSON.stringify(moved), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    // only once the new one is safely written
+    await env.DELIVERIES.delete(bookingKey(booking.id));
+
+    if (booking.invite) {
+      const invite = await readInviteRecord(env, booking.invite);
+      if (invite) {
+        invite.booked = { date, time, at: new Date().toISOString(), name: moved.name, email: moved.email };
+        await env.DELIVERIES.put(inviteKey(booking.invite), JSON.stringify(invite), {
+          httpMetadata: { contentType: "application/json" }
+        });
+      }
+    }
+
+    ctx.waitUntil(confirmCall(env, moved, booking));
+    return json({ ok: true }, 200, cors);
   }
 
   /* Somebody who would rather not pick an hour out of a list. They
@@ -1627,9 +1747,10 @@ async function handleCall(request, env, ctx, cors) {
 
 /* They get a confirmation with a calendar invitation, the same as a
    client whose shoot is confirmed. He gets a Telegram. */
-async function confirmCall(env, record) {
+async function confirmCall(env, record, movedFrom) {
   await telegram(env, [
-    "<b>Call booked</b>",
+    movedFrom ? "<b>Call moved</b>" : "<b>Call booked</b>",
+    movedFrom ? "was " + esc(prettyDate(movedFrom.date)) + " at " + esc(movedFrom.time) : "",
     "",
     // the character itself, not an entity: Telegram only understands
     // &lt; &gt; and &amp;, so anything else arrives as literal text
@@ -1643,7 +1764,7 @@ async function confirmCall(env, record) {
   if (!env.RESEND_API_KEY || !env.MAIL_FROM) return;
 
   const first = record.name.split(/\s+/)[0];
-  const subject = "Booked: " + prettyDate(record.date) + " at " + record.time;
+  const subject = (movedFrom ? "Moved: " : "Booked: ") + prettyDate(record.date) + " at " + record.time;
 
   const ics = buildIcs({
     slug: "call",
@@ -1655,9 +1776,10 @@ async function confirmCall(env, record) {
   });
 
   const html = mailHtml({
-    headline: "We are on",
+    headline: movedFrom ? "Moved" : "We are on",
     lead: (first ? esc(first) + ", that" : "That") +
-      " time is yours. The invitation is attached so it goes straight into your calendar.",
+      " time is yours. The invitation is attached so it goes straight into your calendar." +
+      (movedFrom ? " The old one is cancelled." : ""),
     detail: {
       label: "The call",
       big: prettyDate(record.date) + ", " + record.time,
@@ -2828,13 +2950,16 @@ function mailHtml({ headline, lead, detail, quote, action, foot }) {
       <tr><td style="font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.6;font-style:italic;color:#ffffff;">&ldquo;${esc(quote)}&rdquo;</td></tr>
     </table>
   </td></tr>` : ""}
-  <tr><td style="padding:30px 36px 0 36px;">
+  ${/* Optional. A reminder has nothing to click: the whole message is
+        that somebody will ring you tomorrow, and a button under that
+        only invites a second guess about what is being asked. */ ""}
+  ${action ? `<tr><td style="padding:30px 36px 0 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
       <tr><td style="background-color:#ffffff;border-radius:999px;">
         <a href="${esc(action.url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">${esc(action.text)}</a>
       </td></tr>
     </table>
-  </td></tr>
+  </td></tr>` : ""}
   <tr><td style="padding:30px 36px 32px 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
       <tr><td style="padding:16px 0 0 0;${cell}font-size:12px;line-height:1.6;color:#5e5e5e;">${esc(foot)}</td></tr>
@@ -3069,6 +3194,108 @@ async function morningBrief(env, sayNothing) {
   }
 
   await telegram(env, ["<b>This morning</b>", ""].concat(lines).join("\n"));
+}
+
+/* ============ REMINDING THEM THE DAY BEFORE ============ */
+/* A call booked three weeks ago is a call somebody has forgotten.
+
+   It goes out at eight the morning before rather than exactly
+   twenty four hours ahead, because a nine o'clock call would
+   otherwise be reminded at nine the previous morning, while they are
+   opening up, and a late one at an hour nobody reads. Eight is when
+   post gets looked at.
+
+   Each booking is marked once reminded, so a cron that fires twice or
+   a day that gets missed can never send it again. */
+
+async function remindTomorrow(env) {
+  if (!env.DELIVERIES || !env.RESEND_API_KEY || !env.MAIL_FROM) return;
+
+  const tomorrow = addDays(todayThere(SHOOT_TZ), 1);
+
+  for (const booking of await readBookings(env)) {
+    if (booking.date !== tomorrow || booking.reminded) continue;
+    if (!booking.email) continue;
+
+    const sent = await mailReminder(env, booking);
+    if (!sent) continue;
+
+    booking.reminded = true;
+    try {
+      await env.DELIVERIES.put(bookingKey(booking.id), JSON.stringify(booking), {
+        httpMetadata: { contentType: "application/json" }
+      });
+    } catch (err) {
+      // it has gone out; failing to write the mark would only risk a
+      // second one tomorrow, which is no longer tomorrow
+      console.log("could not mark a reminder as sent:", String(err));
+    }
+  }
+}
+
+async function mailReminder(env, record) {
+  const first = String(record.name || "").split(/\s+/)[0];
+  const when = prettyDate(record.date) + ", " + record.time;
+
+  /* Only a booking made since moving existed has a secret, so older
+     ones get the reply line alone rather than a button that could not
+     know which call it meant. */
+  const move = record.move
+    ? { text: "Move the call", url: "https://clients.noiraunoir.com/call/#move-" + record.move }
+    : null;
+
+  const html = mailHtml({
+    headline: "We speak tomorrow",
+    lead: (first ? esc(first) + ", a" : "A") +
+      " reminder that our call is tomorrow. I will ring you, so there is " +
+      "nothing for you to join and nothing to prepare.",
+    detail: {
+      label: "Tomorrow",
+      big: when,
+      // the character itself, never an entity: this line is escaped
+      // downstream and an entity would arrive as its own source
+      sub: (record.minutes || 20) + " minutes" +
+        (record.phone ? " · I will call you on " + record.phone : "")
+    },
+    quote: "",
+    action: move,
+    foot: move
+      ? "Or just reply to this, whichever is easier."
+      : "If something has come up, reply to this and we will find another time."
+  });
+
+  const text = [
+    "We speak tomorrow",
+    "",
+    when + ", " + (record.minutes || 20) + " minutes.",
+    record.phone ? "I will call you on " + record.phone + "." : "",
+    "",
+    move ? "To move it: " + move.url : "If something has come up, just reply to this.",
+    "",
+    "Noir au Noir"
+  ].filter(Boolean).join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [record.email],
+        reply_to: REPLY_TO,
+        subject: "Tomorrow at " + record.time,
+        html, text
+      })
+    });
+    if (!res.ok) console.log("reminder failed:", res.status, await res.text());
+    return res.ok;
+  } catch (err) {
+    console.log("reminder error:", String(err));
+    return false;
+  }
 }
 
 /* ============ HEALTH CHECK ============ */
