@@ -76,6 +76,9 @@ const ALLOWED_ORIGINS = [
   "http://localhost:4175",
   "http://localhost:4177",
   "https://clients.noiraunoir.com",
+  // the portal's home since September 2026; clients. only forwards here
+  "https://noiraunoir.com",
+  "https://www.noiraunoir.com",
   "https://proposal.noiraunoir.com",
   "http://localhost:4176"
 ];
