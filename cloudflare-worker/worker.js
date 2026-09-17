@@ -28,20 +28,20 @@ const SITES = {
   // so adding a client needs no change here at all
   clients: {
     repo: "vollerodaniele-rgb/clients", label: "idea",
-    name: "client request", url: "https://clients.noiraunoir.com",
+    name: "client request", url: "https://noiraunoir.com",
     perClient: true
   },
   // a standalone idea box; the box name is a second label so boxes
   // never see each other
   box: {
     repo: "vollerodaniele-rgb/clients", label: "idea",
-    name: "idea", url: "https://clients.noiraunoir.com",
+    name: "idea", url: "https://noiraunoir.com",
     perClient: true, clientWord: "box"
   },
   // someone picking a package on a proposal
   proposal: {
     repo: "vollerodaniele-rgb/clients", label: "accepted",
-    name: "PROPOSAL ACCEPTED", url: "https://clients.noiraunoir.com",
+    name: "PROPOSAL ACCEPTED", url: "https://noiraunoir.com",
     perClient: true, clientWord: "proposal", via: "the proposal", email: true
   },
   // a client tapping one of the shoot dates offered on their portal.
@@ -50,7 +50,7 @@ const SITES = {
   // on the requests wall or in the requests panel
   shoot: {
     repo: "vollerodaniele-rgb/clients", label: "shoot",
-    name: "SHOOT DATE PICKED", url: "https://clients.noiraunoir.com",
+    name: "SHOOT DATE PICKED", url: "https://noiraunoir.com",
     perClient: true, via: "the portal", email: true
   }
 };
@@ -1793,7 +1793,7 @@ async function confirmCall(env, record, movedFrom) {
         (record.phone ? " · I will call you on " + record.phone : "")
     },
     quote: "",
-    action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
+    action: { text: "See the work", url: "https://noiraunoir.com/demo/" },
     foot: "If something comes up, just reply to this and we will find another time."
   });
 
@@ -1853,7 +1853,7 @@ async function confirmAsk(env, record) {
       sub: "If that is the wrong one, reply to this and say so"
     },
     quote: "",
-    action: { text: "See the work", url: "https://clients.noiraunoir.com/demo/" },
+    action: { text: "See the work", url: "https://noiraunoir.com/demo/" },
     foot: "If you would rather pick the hour yourself, reply and we will send you times."
   });
 
@@ -1886,7 +1886,7 @@ async function confirmAsk(env, record) {
    because a link that says nothing is a link nobody opens, and the
    button carries the same three hours behind it. */
 async function mailInvite(env, { to, id, invite, slots }) {
-  const link = "https://clients.noiraunoir.com/call/#" + id;
+  const link = "https://noiraunoir.com/call/#" + id;
   const first = String(invite.name || "").split(/\s+/)[0];
   const minutes = invite.minutes || 20;
   const subject = first ? first + ", pick a time" : "Pick a time";
@@ -2144,7 +2144,7 @@ async function sweepExpiredTransfers(env) {
    other studio mail, so a transfer looks like it came from the same
    place as everything else. */
 async function mailTransfer(env, { to, id, meta, count, size }) {
-  const link = "https://clients.noiraunoir.com/t/#" + id;
+  const link = "https://noiraunoir.com/t/#" + id;
   const title = meta.title || "Files for you";
   const mb = size / (1024 * 1024);
   const readable = mb >= 1 ? mb.toFixed(1) + " MB" : Math.max(1, Math.round(size / 1024)) + " KB";
@@ -2451,12 +2451,12 @@ async function mailShootInvite(env, { to, who, client, plan, date, time, locatio
       sub: [location, focus].filter(Boolean).join(" · ")
     },
     quote: "",
-    action: { text: "See it in your portal", url: "https://clients.noiraunoir.com/" + client + "/" },
+    action: { text: "See it in your portal", url: "https://noiraunoir.com/" + client + "/" },
     foot: "Anything you need to have ready is listed in your portal."
   });
 
   const text = [subject, "", location, focus, "",
-    "https://clients.noiraunoir.com/" + client + "/"].filter(Boolean).join("\n");
+    "https://noiraunoir.com/" + client + "/"].filter(Boolean).join("\n");
 
   try {
     const res = await fetch(RESEND_ENDPOINT, {
@@ -2604,7 +2604,7 @@ async function countView(env, slug, who) {
       w.ip ? "IP " + esc(w.ip) : "",
       w.coords ? "Roughly https://www.google.com/maps?q=" + esc(w.coords) : "",
       "",
-      "https://clients.noiraunoir.com/p/" + slug + "/"
+      "https://noiraunoir.com/p/" + slug + "/"
     ].filter((l) => l !== "").join("\n"));
   } catch (err) {
     console.log("could not record a view:", String(err));
@@ -2680,7 +2680,7 @@ async function sendWelcome(request, env, cors) {
 
 async function mailWelcome(env, { to, who, client, plan }) {
   const brand = String(plan.name || client).trim();
-  const url = "https://clients.noiraunoir.com/" + client + "/";
+  const url = "https://noiraunoir.com/" + client + "/";
   const first = who.split(/\s+/)[0];
   const isProject = plan.kind === "project";
 
@@ -3244,7 +3244,7 @@ async function mailReminder(env, record) {
      ones get the reply line alone rather than a button that could not
      know which call it meant. */
   const move = record.move
-    ? { text: "Move the call", url: "https://clients.noiraunoir.com/call/#move-" + record.move }
+    ? { text: "Move the call", url: "https://noiraunoir.com/call/#move-" + record.move }
     : null;
 
   const html = mailHtml({
