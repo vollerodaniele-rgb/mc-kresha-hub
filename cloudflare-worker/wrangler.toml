@@ -19,3 +19,24 @@ crons = ["0 5 * * *", "0 6 * * *", "0 7 * * *"]
 [[r2_buckets]]
 binding = "DELIVERIES"
 bucket_name = "noir-deliveries"
+
+# A budget per address, by the minute, so a flood cannot run the bill up
+# on reads or fill the bucket with writes. Reads are generous: one
+# portal page asks for a month of thumbnails at once, and an office
+# behind a single address should never feel this. A write is always one
+# person pressing one button, so it needs far less room.
+[[ratelimits]]
+name = "READ_RATE"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 300
+  period = 60
+
+[[ratelimits]]
+name = "WRITE_RATE"
+namespace_id = "1002"
+
+  [ratelimits.simple]
+  limit = 30
+  period = 60

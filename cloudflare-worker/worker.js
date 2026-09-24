@@ -124,6 +124,30 @@ export default {
       return new Response(null, { status: 204, headers: cors });
     }
 
+    /* A flood is what turns a free bucket into a bill, so every address
+       gets a budget by the minute. Reads are generous, because one
+       portal page asks for a month of thumbnails at once and a family
+       behind one office address should never notice this. Writes are
+       not, because a write is always one person pressing one button.
+
+       Guarded, so the worker still runs if it is deployed without the
+       limiters bound. */
+    const budget = (request.method === "GET" || request.method === "HEAD")
+      ? env.READ_RATE : env.WRITE_RATE;
+
+    if (budget) {
+      const who = request.headers.get("CF-Connecting-IP") || "nowhere";
+      try {
+        const { success } = await budget.limit({ key: who });
+        if (!success) {
+          return json({ error: "too many requests in a minute. Wait a moment and try again." }, 429, cors);
+        }
+      } catch (err) {
+        // a limiter that breaks must not take the studio down with it
+        console.log("rate limit check failed:", String(err));
+      }
+    }
+
     // Reading the wall goes through here too. Anonymous browsers only
     // get 60 GitHub calls an hour per address, which a shared office or
     // mobile network burns through quickly; the token we hold is good
@@ -136,8 +160,8 @@ export default {
       if (url.pathname === "/telegram-setup") return telegramSetup(env, cors);
       if (url.pathname === "/mail-setup") return mailSetup(env, cors);
       if (url.pathname === "/delivery") return listDelivery(url, env, cors);
-      if (url.pathname === "/file") return serveDelivery(url, env);
-      if (url.pathname === "/thumb") return serveThumb(url, env);
+      if (url.pathname === "/file") return serveDelivery(url, env, request, ctx);
+      if (url.pathname === "/thumb") return serveThumb(url, env, request, ctx);
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
       if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
@@ -660,6 +684,19 @@ function deliveryKey(client, month, name) {
    Anything with a path in it is refused rather than quietly trimmed to
    its last part: silently storing a file under a different name than
    the one asked for is worse than saying no. */
+/* What the caller says it is sending. A request that leaves the length
+   out is refused rather than trusted: a cap that can be skipped by
+   omitting a header is not a cap, and a browser sending a file always
+   states its length. */
+function statedSize(request) {
+  const raw = request.headers.get("Content-Length");
+  if (raw === null) return -1;
+  const size = Number(raw);
+  return Number.isFinite(size) && size >= 0 ? size : -1;
+}
+
+const NO_SIZE = "the upload did not say how big it is, so it was not accepted";
+
 function safeName(raw) {
   const name = String(raw || "").trim();
   if (!name || name.length > 120) return "";
@@ -686,7 +723,8 @@ async function acceptDelivery(request, env, cors) {
     return json({ error: "that key cannot write to this studio" }, 403, cors);
   }
 
-  const size = Number(request.headers.get("Content-Length") || 0);
+  const size = statedSize(request);
+  if (size < 0) return json({ error: NO_SIZE }, 411, cors);
   if (size > MAX_UPLOAD) {
     return json({
       error: "that file is over 95MB, which is more than one upload can carry. " +
@@ -720,7 +758,7 @@ const POST_RE = /^[A-Za-z0-9_-]{4,24}$/;
 
 const thumbKey = (client, post) => "_thumb/" + client + "/" + post + ".jpg";
 
-async function serveThumb(url, env) {
+async function serveThumb(url, env, request, ctx) {
   if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
 
   const client = String(url.searchParams.get("client") || "").toLowerCase();
@@ -729,6 +767,9 @@ async function serveThumb(url, env) {
     return new Response("unknown frame", { status: 400 });
   }
 
+  const held = await edgeHit(request);
+  if (held) return held;
+
   const object = await env.DELIVERIES.get(thumbKey(client, post));
   if (!object) return new Response("not found", { status: 404 });
 
@@ -736,9 +777,12 @@ async function serveThumb(url, env) {
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
   // shown in the page rather than downloaded, unlike a delivery
-  headers.set("Cache-Control", "public, max-age=86400");
+  headers.set("Cache-Control", "public, max-age=" + EDGE_THUMB);
   headers.set("Access-Control-Allow-Origin", "*");
-  return new Response(object.body, { headers });
+
+  const res = new Response(object.body, { headers });
+  edgeKeep(request, res.clone(), ctx);
+  return res;
 }
 
 async function putThumb(request, env, cors) {
@@ -759,7 +803,8 @@ async function putThumb(request, env, cors) {
   const type = request.headers.get("X-File-Type") || "";
   if (!/^image\//.test(type)) return json({ error: "that is not a picture" }, 400, cors);
 
-  const size = Number(request.headers.get("Content-Length") || 0);
+  const size = statedSize(request);
+  if (size < 0) return json({ error: NO_SIZE }, 411, cors);
   if (size > THUMB_MAX) {
     return json({ error: "that frame is too big. It only needs to be a thumbnail." }, 413, cors);
   }
@@ -818,7 +863,48 @@ async function listDelivery(url, env, cors) {
   }
 }
 
-async function serveDelivery(url, env) {
+/* ============ THE EDGE COPY ============ */
+/* Every download is a read of the bucket, because the worker hands the
+   file over itself. A delivery and a thumbnail never change under the
+   same address, so Cloudflare is allowed to keep a copy: the second
+   person to ask costs nothing and gets it faster. Transfers are left
+   out on purpose, since they expire and are counted.
+
+   The stored copy says public, because a cache will not keep anything
+   marked private. What goes back to the client still says private, so
+   nothing in between holds on to a client's film. */
+const EDGE_DELIVERY = 3600;
+const EDGE_THUMB = 86400;
+
+async function edgeHit(request) {
+  if (!request || request.method !== "GET") return null;
+  try {
+    return (await caches.default.match(request)) || null;
+  } catch (err) {
+    console.log("cache read failed:", String(err));
+    return null;
+  }
+}
+
+function edgeKeep(request, response, ctx) {
+  if (!request || request.method !== "GET" || !ctx) return;
+  try {
+    ctx.waitUntil(caches.default.put(request, response));
+  } catch (err) {
+    // a cache that refuses is no reason to fail the download
+    console.log("cache write failed:", String(err));
+  }
+}
+
+/* Same bytes, dressed as a download and marked for this browser only. */
+function asDownload(response, name) {
+  const headers = new Headers(response.headers);
+  headers.set("Content-Disposition", 'attachment; filename="' + name.replace(/"/g, "") + '"');
+  headers.set("Cache-Control", "private, max-age=" + EDGE_DELIVERY);
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function serveDelivery(url, env, request, ctx) {
   if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
 
   const client = String(url.searchParams.get("client") || "").toLowerCase();
@@ -828,18 +914,22 @@ async function serveDelivery(url, env) {
     return new Response("unknown file", { status: 400 });
   }
 
+  const held = await edgeHit(request);
+  // download rather than open, and never under a name the URL invented
+  if (held) return asDownload(held, name);
+
   const object = await env.DELIVERIES.get(deliveryKey(client, month, name));
   if (!object) return new Response("not found", { status: 404 });
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
   headers.set("etag", object.httpEtag);
-  headers.set("Cache-Control", "private, max-age=3600");
-  // download rather than open, and never under a name the URL invented
-  headers.set("Content-Disposition", 'attachment; filename="' + name.replace(/"/g, "") + '"');
+  headers.set("Cache-Control", "public, max-age=" + EDGE_DELIVERY);
   headers.set("Access-Control-Allow-Origin", "*");
 
-  return new Response(object.body, { headers });
+  const kept = new Response(object.body, { headers });
+  edgeKeep(request, kept.clone(), ctx);
+  return asDownload(kept, name);
 }
 
 /* ============ REFERRAL PARTNERS ============ */
@@ -2050,7 +2140,8 @@ async function handleTransfer(request, env, cors) {
     const name = safeName(url.searchParams.get("name"));
     if (!name) return json({ error: "that file name cannot be used" }, 400, cors);
 
-    const size = Number(request.headers.get("Content-Length") || 0);
+    const size = statedSize(request);
+    if (size < 0) return json({ error: NO_SIZE }, 411, cors);
     if (size > MAX_UPLOAD) {
       return json({ error: "that file is over 95MB, which is more than one upload can carry." }, 413, cors);
     }
