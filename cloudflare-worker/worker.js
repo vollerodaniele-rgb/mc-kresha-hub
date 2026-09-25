@@ -170,6 +170,8 @@ export default {
       if (url.pathname === "/call/invite") return readInvite(url, env, cors);
       if (url.pathname === "/ref") return readPartner(url, env, cors);
       if (url.pathname === "/ref/board") return readBoard(url, env, cors);
+      if (url.pathname === "/code") return checkCode(url, env, cors);
+      if (url.pathname === "/codes") return listCodes(request, url, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
@@ -215,6 +217,10 @@ export default {
 
     if (new URL(request.url).pathname.startsWith("/ref/")) {
       return handlePartner(request, env, ctx, cors);
+    }
+
+    if (new URL(request.url).pathname.startsWith("/code/")) {
+      return handleCode(request, env, cors);
     }
 
     let data;
@@ -1214,6 +1220,124 @@ async function handlePartner(request, env, ctx, cors) {
   return json({ error: "unknown action" }, 404, cors);
 }
 
+/* ============ OFFER CODES ============ */
+/* A short code worth free reels, for a limited number of days. Made in
+   the dashboard, handed out by hand, typed on the reels page or opened
+   from a link that carries it.
+
+   Checked here and never on the page, so a code cannot be read out of
+   the page source and an expired one is refused rather than trusted.
+   A booking that carries a code has it checked again when it arrives,
+   because the page could have been left open past the deadline. */
+const CODE_RE = /^[A-Z0-9-]{4,20}$/;
+const codeKey = (code) => "_code/" + code + ".json";
+const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O or 1/I to misread
+
+function newCode() {
+  const bytes = crypto.getRandomValues(new Uint8Array(6));
+  return "REEL-" + [...bytes].map((b) => CODE_ALPHABET[b % CODE_ALPHABET.length]).join("");
+}
+
+const cleanCode = (raw) => String(raw || "").trim().toUpperCase();
+
+/* today, in the timezone the studio lives in, so a code "until Sunday"
+   is still good on Sunday evening in Gent */
+function todayInGent() {
+  return new Date().toLocaleDateString("sv-SE", { timeZone: "Europe/Brussels" });
+}
+
+/* The code if it exists and has not run out, otherwise null. */
+async function liveCode(env, raw) {
+  const code = cleanCode(raw);
+  if (!code || !CODE_RE.test(code) || !env.DELIVERIES) return null;
+  const record = await readRecord(env, codeKey(code));
+  if (!record || record.until < todayInGent()) return null;
+  return { code: record.code, freeReels: record.freeReels, until: record.until };
+}
+
+function codeLine(record) {
+  if (!record.code) return "";
+  const c = record.code;
+  return "<b>Code " + esc(c.code) + "</b>: " + c.freeReels + " reel" + (c.freeReels === 1 ? "" : "s") + " free";
+}
+
+/* Public: is this code good, and what is it worth. Nothing else, and
+   the same answer for a code that never existed as for one that ran
+   out, so trying codes teaches nobody anything. */
+async function checkCode(url, env, cors) {
+  const live = await liveCode(env, url.searchParams.get("c"));
+  if (!live) return json({ error: "not a code, or it has run out" }, 404, cors);
+  return json({ ok: true, code: live.code, freeReels: live.freeReels, until: live.until }, 200, cors);
+}
+
+async function listCodes(request, url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
+
+  const all = await readAllRecords(env, "_code/");
+  const booked = await readBookings(env);
+  const asked = await readAsks(env);
+  const used = (code) =>
+    booked.filter((b) => b.code && b.code.code === code).length +
+    asked.filter((a) => a.code && a.code.code === code).length;
+
+  const today = todayInGent();
+  const codes = all.map((c) => ({
+    code: c.code, freeReels: c.freeReels, until: c.until, at: c.at || "",
+    live: c.until >= today, used: used(c.code)
+  })).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  return json({ codes }, 200, cors);
+}
+
+async function handleCode(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const action = new URL(request.url).pathname.slice("/code/".length);
+
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) return json({ error: "that key cannot write to this studio" }, 403, cors);
+
+  if (action === "new") {
+    const freeReels = Math.max(1, Math.min(5, Math.round(Number(body.freeReels) || 1)));
+    const days = Math.max(1, Math.min(60, Math.round(Number(body.days) || 7)));
+
+    let code = cleanCode(body.code);
+    if (code && !CODE_RE.test(code)) return json({ error: "a code is 4 to 20 letters, numbers or dashes" }, 400, cors);
+    if (code && await readRecord(env, codeKey(code))) return json({ error: "that code exists already" }, 409, cors);
+    if (!code) {
+      for (let tries = 0; tries < 5 && !code; tries++) {
+        const made = newCode();
+        if (!await readRecord(env, codeKey(made))) code = made;
+      }
+      if (!code) return json({ error: "could not make a free code, try again" }, 500, cors);
+    }
+
+    // valid through the last day, counted in Gent
+    const until = new Date(todayInGent() + "T12:00:00Z");
+    until.setUTCDate(until.getUTCDate() + days - 1);
+
+    const record = { code, freeReels, until: until.toISOString().slice(0, 10), at: new Date().toISOString() };
+    await env.DELIVERIES.put(codeKey(code), JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true, ...record }, 201, cors);
+  }
+
+  if (action === "remove") {
+    const code = cleanCode(body.code);
+    if (!CODE_RE.test(code)) return json({ error: "unknown code" }, 400, cors);
+    await env.DELIVERIES.delete(codeKey(code));
+    return json({ ok: true }, 200, cors);
+  }
+
+  return json({ error: "unknown action" }, 404, cors);
+}
+
 /* A board key is the whole lock on a partner's figures, so it is long
    and random: 128 bits, where a transfer link gets 72. */
 function newBoardKey() {
@@ -1685,12 +1809,15 @@ async function handleCall(request, env, ctx, cors) {
       return json({ error: "that time has just gone, pick another" }, 409, cors);
     }
 
+    const code = await liveCode(env, body.code);
+
     const record = {
       id: slotId(date, time),
       date, time, name, email, phone, note: about,
       minutes,
       invite: from || "",
       ref,
+      code,
       /* A secret of its own, so the reminder can offer to move it.
          The id above is the date and the hour, which anybody could
          guess, and a move link built on that would let a stranger
@@ -1794,9 +1921,11 @@ async function handleCall(request, env, ctx, cors) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) return json({ error: "bad email" }, 400, cors);
     if (!phone) return json({ error: "bad phone" }, 400, cors);
 
+    const code = await liveCode(env, body.code);
+
     const record = {
       id: newTransferId(),
-      name, email, phone, note: about, ref,
+      name, email, phone, note: about, ref, code,
       done: false,
       at: new Date().toISOString()
     };
@@ -2007,6 +2136,7 @@ async function confirmCall(env, record, movedFrom) {
     esc(record.name) + " · " + esc(record.email),
     record.phone ? "<b>" + esc(record.phone) + "</b>" : "",
     record.ref ? "Sent by a partner" : "",
+    codeLine(record),
     esc(prettyDate(record.date)) + " at " + esc(record.time),
     record.note ? "\n" + esc(record.note) : ""
   ].filter(Boolean).join("\n"));
@@ -2082,6 +2212,7 @@ async function confirmAsk(env, record) {
     esc(record.name) + " · " + esc(record.email),
     "<b>" + esc(record.phone) + "</b>",
     record.ref ? "Sent by " + esc(record.ref) : "",
+    codeLine(record),
     record.note ? "\n" + esc(record.note) : ""
   ].filter(Boolean).join("\n"));
 
