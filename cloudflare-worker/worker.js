@@ -169,6 +169,7 @@ export default {
       if (url.pathname === "/call/booking") return readBookingToMove(url, env, cors);
       if (url.pathname === "/call/invite") return readInvite(url, env, cors);
       if (url.pathname === "/ref") return readPartner(url, env, cors);
+      if (url.pathname === "/ref/board") return readBoard(url, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
@@ -944,6 +945,7 @@ async function serveDelivery(url, env, request, ctx) {
    nothing that matters is decided by holding one. */
 const PARTNER_RE = /^[a-z0-9][a-z0-9-]{1,39}$/;
 
+const PARTNER_PREFIX = "_ref/";
 const partnerKey = (id) => "_ref/" + id + ".json";
 
 /* Partner links were random strings before they were names, and the
@@ -1051,7 +1053,10 @@ async function listPartners(request, url, env, cors) {
       opens: p.opens || 0,
       lastOpen: p.lastOpen || "",
       calls: theirs.length,
-      who: theirs.map((b) => ({ name: b.name, date: b.date || "", time: b.time || "" }))
+      who: theirs.map((b) => ({ name: b.name, date: b.date || "", time: b.time || "" })),
+      by: p.by || "",
+      clients: Array.isArray(p.clients) ? p.clients : [],
+      board: p.board || null
     };
   });
 
@@ -1093,15 +1098,110 @@ async function handlePartner(request, env, ctx, cors) {
     const id = await freePartnerSlug(env, slugify(name));
     if (!id) return json({ error: "that name cannot be used as a link" }, 400, cors);
 
+    // brought in by another partner, if that partner exists
+    const by = String(body.by || "");
+    const recruiter = partnerIdOk(by) ? await readPartnerRecord(env, by) : null;
+
     await env.DELIVERIES.put(partnerKey(id), JSON.stringify({
       id, name,
       discount: String(body.discount || "").trim().slice(0, 40),
       note: String(body.note || "").trim().slice(0, 300),
       opens: 0, lastOpen: "",
+      by: recruiter ? by : "",
+      clients: [],
+      key: newBoardKey(),
       at: new Date().toISOString()
     }), { httpMetadata: { contentType: "application/json" } });
 
     return json({ ok: true, id }, 201, cors);
+  }
+
+  /* Who brought a partner in, and which clients a partner brought. The
+     money follows from these two, so they are kept tight: a partner
+     cannot be their own recruiter, a chain cannot loop back on itself,
+     and a client belongs to one partner only. */
+  if (action === "set") {
+    const id = String(body.id || "");
+    const partner = partnerIdOk(id) ? await readPartnerRecord(env, id) : null;
+    if (!partner) return json({ error: "unknown partner" }, 404, cors);
+
+    const all = await readAllRecords(env, PARTNER_PREFIX);
+    const byId = new Map(all.map((p) => [p.id, p]));
+
+    if ("by" in body) {
+      const by = String(body.by || "");
+      if (!by) {
+        partner.by = "";
+      } else {
+        if (by === id || !byId.has(by)) return json({ error: "that recruiter is not a partner" }, 400, cors);
+        // walk up from the new recruiter; meeting this partner means a loop
+        let up = by;
+        for (let hop = 0; up && hop < 20; hop++) {
+          if (up === id) return json({ error: "that would make a loop" }, 400, cors);
+          up = (byId.get(up) || {}).by || "";
+        }
+        partner.by = by;
+      }
+    }
+
+    if ("clients" in body) {
+      const wanted = [...new Set((Array.isArray(body.clients) ? body.clients : [])
+        .map((c) => String(c || "").toLowerCase())
+        .filter((c) => CLIENT_RE.test(c)))].slice(0, 50);
+
+      // taken off any other partner first, so nobody is paid twice
+      for (const other of all) {
+        if (other.id === id || !Array.isArray(other.clients)) continue;
+        const kept = other.clients.filter((c) => !wanted.includes(c));
+        if (kept.length !== other.clients.length) {
+          other.clients = kept;
+          await env.DELIVERIES.put(partnerKey(other.id), JSON.stringify(other), {
+            httpMetadata: { contentType: "application/json" }
+          });
+        }
+      }
+      partner.clients = wanted;
+    }
+
+    await env.DELIVERIES.put(partnerKey(id), JSON.stringify(partner), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true, by: partner.by || "", clients: partner.clients || [] }, 200, cors);
+  }
+
+  /* The private address of a partner's board. Made on first request for
+     partners that existed before boards did. */
+  if (action === "key") {
+    const id = String(body.id || "");
+    const partner = partnerIdOk(id) ? await readPartnerRecord(env, id) : null;
+    if (!partner) return json({ error: "unknown partner" }, 404, cors);
+    if (!partner.key) {
+      partner.key = newBoardKey();
+      await env.DELIVERIES.put(partnerKey(id), JSON.stringify(partner), {
+        httpMetadata: { contentType: "application/json" }
+      });
+    }
+    return json({ ok: true, key: partner.key }, 200, cors);
+  }
+
+  /* What each board shows. Worked out in the dashboard, which is the only
+     place that can read the payments, and handed over here so a partner
+     can read their own without a key to anything else. */
+  if (action === "boards") {
+    const boards = body.boards && typeof body.boards === "object" ? body.boards : {};
+    const now = new Date().toISOString();
+    let saved = 0;
+
+    for (const [id, raw] of Object.entries(boards).slice(0, 200)) {
+      const partner = partnerIdOk(id) ? await readPartnerRecord(env, id) : null;
+      if (!partner || !raw || typeof raw !== "object") continue;
+      partner.board = cleanBoard(raw, now);
+      await env.DELIVERIES.put(partnerKey(id), JSON.stringify(partner), {
+        httpMetadata: { contentType: "application/json" }
+      });
+      saved++;
+    }
+    return json({ ok: true, saved }, 200, cors);
   }
 
   if (action === "remove") {
@@ -1112,6 +1212,63 @@ async function handlePartner(request, env, ctx, cors) {
   }
 
   return json({ error: "unknown action" }, 404, cors);
+}
+
+/* A board key is the whole lock on a partner's figures, so it is long
+   and random: 128 bits, where a transfer link gets 72. */
+function newBoardKey() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+const BOARD_KEY_RE = /^[A-Za-z0-9_-]{20,40}$/;
+
+const cents = (n) => Math.round((Number(n) || 0) * 100) / 100;
+
+function cleanBoard(raw, now) {
+  const rows = (list) => (Array.isArray(list) ? list : []).slice(0, 50).map((r) => ({
+    name: String((r && r.name) || "").slice(0, 60),
+    earned: cents(r && r.earned)
+  }));
+  return {
+    earned: cents(raw.earned),
+    paidOut: cents(raw.paidOut),
+    owed: cents(raw.owed),
+    thisMonth: cents(raw.thisMonth),
+    clients: rows(raw.clients),
+    recruits: rows(raw.recruits),
+    share: cents(raw.share),
+    recruitShare: cents(raw.recruitShare),
+    months: Math.max(0, Math.min(120, Math.round(Number(raw.months) || 0))),
+    updated: now
+  };
+}
+
+/* A partner's own board, read with the key in their link. Only their
+   figures and their name, never another partner's. */
+async function readBoard(url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const key = String(url.searchParams.get("key") || "");
+  if (!BOARD_KEY_RE.test(key)) return json({ error: "gone" }, 404, cors);
+
+  const all = await readAllRecords(env, PARTNER_PREFIX);
+  const partner = all.find((p) => p.key && p.key === key);
+  if (!partner) return json({ error: "gone" }, 404, cors);
+
+  const booked = await readBookings(env);
+  const asked = await readAsks(env);
+  const calls = booked.filter((b) => b.ref === partner.id).length +
+    asked.filter((a) => a.ref === partner.id).length;
+
+  return json({
+    id: partner.id,
+    name: partner.name || "",
+    opens: partner.opens || 0,
+    calls,
+    board: partner.board || null
+  }, 200, cors);
 }
 
 async function notePartnerOpen(env, id) {
