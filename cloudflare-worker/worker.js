@@ -536,18 +536,26 @@ async function notifyTelegram(env, { site, client, name, email, idea, hasImage, 
 
 /* One place that actually talks to Telegram, used by the submission
    pings and by the health check. */
-async function telegram(env, text) {
+/* `buttons` is an optional row of link buttons, [{ text, url }], shown
+   under the message. Links only: a button that called back into the
+   worker would need a webhook, and a link to the dashboard needs his key
+   to do anything, which is the point. */
+async function telegram(env, text, buttons) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return false;
   try {
+    const message = {
+      chat_id: env.TELEGRAM_CHAT_ID,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true
+    };
+    if (Array.isArray(buttons) && buttons.length) {
+      message.reply_markup = { inline_keyboard: [buttons] };
+    }
     const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: env.TELEGRAM_CHAT_ID,
-        text,
-        parse_mode: "HTML",
-        disable_web_page_preview: true
-      })
+      body: JSON.stringify(message)
     });
     if (!res.ok) console.log("telegram failed:", res.status, await res.text());
     return res.ok;
@@ -1269,6 +1277,25 @@ function cleanReels(raw, code) {
     place: String(raw.place || "").trim().slice(0, 80),
     price: Math.max(0, Math.min(1000, Number(raw.price) || 0))
   };
+}
+
+/* A reels booking arrives with a button that opens the dashboard on a
+   confirm screen for it. One press there makes their One take portal. */
+function confirmButton(kind, record) {
+  if (!record.reels || record.client) return null;
+  const day = record.reels.day ? prettyDate(record.reels.day) : "their day";
+  return [{
+    text: "Confirm " + day + " and make their portal",
+    url: "https://noiraunoir.com/admin/#confirm=" + kind + ":" + encodeURIComponent(record.id)
+  }];
+}
+
+function reelsLine(record) {
+  const r = record.reels;
+  if (!r) return "";
+  return "<b>" + r.count + " reels" + (r.free ? " + " + r.free + " free" : "") + "</b>" +
+    (r.day ? ", filming " + esc(prettyDate(r.day)) : "") +
+    (r.place ? " at " + esc(r.place) : "");
 }
 
 function codeLine(record) {
@@ -2107,6 +2134,31 @@ async function handleCall(request, env, ctx, cors) {
     return json({ ok: true, done: record.done }, 200, cors);
   }
 
+  /* A reels booking that became a client, so the confirm screen and the
+     agenda both know, and the same booking can never make two portals. */
+  if (action === "made") {
+    const kind = String(body.kind || "");
+    const id = String(body.id || "");
+    const slug = String(body.slug || "").toLowerCase();
+    if (!CLIENT_RE.test(slug)) return json({ error: "unknown client" }, 400, cors);
+
+    let key;
+    if (kind === "ask" && TRANSFER_RE.test(id)) key = askKey(id);
+    else if (kind === "book" && /^[0-9-]{6,20}$/.test(id)) key = bookingKey(id);
+    else return json({ error: "unknown booking" }, 400, cors);
+
+    const object = await env.DELIVERIES.get(key);
+    if (!object) return json({ error: "unknown booking" }, 404, cors);
+    const record = await object.json();
+    record.client = slug;
+    record.madeAt = new Date().toISOString();
+    if (kind === "ask") record.done = true;
+    await env.DELIVERIES.put(key, JSON.stringify(record), {
+      httpMetadata: { contentType: "application/json" }
+    });
+    return json({ ok: true }, 200, cors);
+  }
+
   if (action === "forget") {
     const id = String(body.id || "");
     if (!TRANSFER_RE.test(id)) return json({ error: "unknown request" }, 400, cors);
@@ -2155,10 +2207,11 @@ async function confirmCall(env, record, movedFrom) {
     esc(record.name) + " · " + esc(record.email),
     record.phone ? "<b>" + esc(record.phone) + "</b>" : "",
     record.ref ? "Sent by a partner" : "",
+    reelsLine(record),
     codeLine(record),
     esc(prettyDate(record.date)) + " at " + esc(record.time),
     record.note ? "\n" + esc(record.note) : ""
-  ].filter(Boolean).join("\n"));
+  ].filter(Boolean).join("\n"), movedFrom ? null : confirmButton("book", record));
 
   if (!env.RESEND_API_KEY || !env.MAIL_FROM) return;
 
@@ -2231,9 +2284,10 @@ async function confirmAsk(env, record) {
     esc(record.name) + " · " + esc(record.email),
     "<b>" + esc(record.phone) + "</b>",
     record.ref ? "Sent by " + esc(record.ref) : "",
+    reelsLine(record),
     codeLine(record),
     record.note ? "\n" + esc(record.note) : ""
-  ].filter(Boolean).join("\n"));
+  ].filter(Boolean).join("\n"), confirmButton("ask", record));
 
   if (!env.RESEND_API_KEY || !env.MAIL_FROM) return;
 
