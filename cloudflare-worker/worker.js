@@ -199,6 +199,10 @@ export default {
       return acceptDelivery(request, env, cors);
     }
 
+    if (new URL(request.url).pathname === "/ready") {
+      return sendReady(request, env, cors);
+    }
+
     if (new URL(request.url).pathname === "/thumb") {
       return putThumb(request, env, cors);
     }
@@ -871,10 +875,153 @@ async function listDelivery(url, env, cors) {
       uploaded: o.uploaded
     })).sort((a, b) => a.name.localeCompare(b.name));
 
-    return json({ files }, 200, { ...cors, "Cache-Control": "public, max-age=30" });
+    // when they were last told it was ready, so the editor can say so
+    const told = await readRecord(env, toldKey(client, month));
+
+    return json({ files, told: told ? { at: told.at, count: told.count } : null }, 200,
+      { ...cors, "Cache-Control": "public, max-age=30" });
   } catch (err) {
     console.log("could not list a delivery:", String(err));
     return json({ error: "could not read it" }, 502, cors);
+  }
+}
+
+/* ============ YOUR REELS ARE READY ============ */
+/* A client's delivery sits on their page the moment it is uploaded, but
+   nothing told them. This does, once he presses the button in their
+   editor: how many, and the link. Like the welcome it mails an address
+   the caller supplies (it lives in the private repo, which only the
+   dashboard can read), so it is behind the key and the portal must
+   exist. When it went out is remembered per month, without the address. */
+const toldKey = (client, month) => "_told/" + client + "/" + month + ".json";
+const READY_FILM = /\.(mp4|mov|m4v|webm)$/i;
+const READY_PICTURE = /\.(jpe?g|png|webp|heic|heif|tiff?)$/i;
+
+async function sendReady(request, env, cors) {
+  let data;
+  try { data = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+
+  const key = String(data.key || "");
+  const client = String(data.client || "").toLowerCase();
+  const month = String(data.month || "");
+  const to = String(data.email || "").trim().slice(0, 120);
+  const who = String(data.name || "").trim().slice(0, 60);
+
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!CLIENT_RE.test(client) || !MONTH_RE.test(month)) return json({ error: "unknown delivery" }, 400, cors);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(to)) return json({ error: "bad email" }, 400, cors);
+  if (!await mayWrite(env, key)) return json({ error: "that key cannot write to this studio" }, 403, cors);
+
+  const plan = await readJson(env, CLIENTS_REPO, `data/${client}.json`);
+  if (!plan) return json({ error: "no portal by that name" }, 404, cors);
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) return json({ error: "mail is not configured on this worker" }, 503, cors);
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+
+  const listed = await env.DELIVERIES.list({ prefix: client + "/" + month + "/", limit: 500 });
+  const names = listed.objects.map((o) => o.key.split("/").pop());
+  const films = names.filter((n) => READY_FILM.test(n)).length;
+  const pictures = names.filter((n) => READY_PICTURE.test(n)).length;
+  if (!names.length) return json({ error: "nothing is delivered in that month yet" }, 400, cors);
+
+  const ok = await mailReady(env, { to, who, client, plan, month, films, pictures, files: names.length });
+  if (!ok) return json({ error: "the mail service refused it" }, 502, cors);
+
+  const at = new Date().toISOString();
+  const count = films || names.length;
+  await env.DELIVERIES.put(toldKey(client, month), JSON.stringify({ at, count }), {
+    httpMetadata: { contentType: "application/json" }
+  });
+  return json({ ok: true, at, count }, 200, cors);
+}
+
+function readyMonthName(plan, month) {
+  const entry = (plan.deliveries || []).find((d) => d.month === month);
+  if (entry && entry.label) return entry.label;
+  const [y, m] = month.split("-");
+  const d = new Date(Date.UTC(Number(y), Number(m) - 1, 1));
+  return isNaN(d.getTime()) ? month : d.toLocaleDateString("en-GB", { month: "long", timeZone: "UTC" });
+}
+
+async function mailReady(env, { to, who, client, plan, month, films, pictures, files }) {
+  const reels = plan.kind === "reels";
+  const brand = String(plan.name || client).trim();
+  const first = who.split(/\s+/)[0];
+  const when = readyMonthName(plan, month);
+  // a One take page is only the reels; anyone else finds them under Files
+  const url = "https://noiraunoir.com/" + client + "/" + (reels ? "" : "#files");
+
+  const plural = (n, one, many) => n + " " + (n === 1 ? one : many);
+  const what = reels
+    ? plural(films || files, "reel", "reels")
+    : [films ? plural(films, "film", "films") : "", pictures ? plural(pictures, "photo", "photos") : ""]
+        .filter(Boolean).join(" and ") || plural(files, "file", "files");
+
+  const subject = reels
+    ? (films === 1 ? "Your reel is ready" : "Your " + (films || files) + " reels are ready")
+    : "Your " + when + " delivery is ready";
+
+  const line = reels
+    ? "Your " + what + " from " + when + " " + ((films || files) === 1 ? "is" : "are") +
+      " ready. Watch them on your page, tap one for sound, and download the ones you want. They stay there."
+    : "Everything from " + when + " is ready on your page: " + what + ", ready to download. It stays there.";
+
+  const cell = "font-family:Arial,Helvetica,sans-serif;";
+  const html = `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
+<tr><td align="center" style="padding:24px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
+  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
+  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(first ? "Hi " + first + "." : "Hello.")}</td></tr>
+  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(line)}</td></tr>
+  <tr><td style="padding:28px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
+      <tr><td style="padding:20px 24px 6px 24px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">${esc(reels ? "Ready to post" : "Ready to download")}</td></tr>
+      <tr><td style="padding:0 24px 4px 24px;font-family:Georgia,'Times New Roman',serif;font-size:28px;color:#ffffff;">${esc(what)}</td></tr>
+      <tr><td style="padding:0 24px 18px 24px;${cell}font-size:13px;color:#9a9a9a;">${esc(brand)} &middot; ${esc(when)}</td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:26px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
+      <tr><td style="background-color:#ffffff;border-radius:999px;">
+        <a href="${esc(url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">${esc(reels ? "Watch and download" : "Open your delivery")}</a>
+      </td></tr>
+    </table>
+  </td></tr>
+  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:12px;color:#5e5e5e;">${esc(url)}</td></tr>
+  <tr><td style="padding:26px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">Anything you want changed, just reply to this mail.</td></tr>
+  <tr><td style="padding:30px 36px 32px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
+      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
+    </table>
+  </td></tr>
+</table>
+</td></tr></table>
+</body></html>`;
+
+  const text = [
+    subject, "",
+    first ? "Hi " + first + "." : "Hello.",
+    line, "",
+    url, "",
+    "Anything you want changed, just reply to this mail.", "",
+    "Noir au Noir", REPLY_TO
+  ].join("\n");
+
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ from: env.MAIL_FROM, to: [to], reply_to: REPLY_TO, subject, html, text })
+    });
+    if (!res.ok) console.log("ready mail failed:", res.status, await res.text());
+    return res.ok;
+  } catch (err) {
+    console.log("ready mail error:", String(err));
+    return false;
   }
 }
 
