@@ -580,9 +580,11 @@ async function telegram(env, text, buttons) {
    MAIL_FROM is who it comes from, so moving off the shared Resend
    sender onto send.noiraunoir.com is a setting, not a code change.
 
-   Fonts are Georgia and Arial rather than Playfair and Inter, because
-   Gmail and Outlook strip web fonts. Tables and inline styles, because
-   email clients are stuck in 2005. */
+   Every mail is built from the glass pieces further down (glassShell
+   and the blocks after it), the house style as far as mail allows:
+   Satoshi where the app loads web fonts, the system font where it does
+   not. Tables and inline styles, because email clients are stuck in
+   2005. */
 
 const RESEND_ENDPOINT = "https://api.resend.com/emails";
 const DEFAULT_FROM = "Noir au Noir <onboarding@resend.dev>";
@@ -1024,12 +1026,14 @@ const GLASS = {
   font: "'Satoshi', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif"
 };
 
-function glassMail({ greeting, line, pane, button, closing }) {
-  const f = "font-family:" + GLASS.font + ";";
+/* The pieces every mail is built from. Each returns table rows for the
+   600px column, so a template is a list of these and nothing else. */
+const gf = () => "font-family:" + GLASS.font + ";";
+
+function glassShell(rows) {
   const fonts = [400, 500, 700].map((w) =>
     `@font-face{font-family:'Satoshi';font-weight:${w};font-style:normal;` +
     `src:url('https://noiraunoir.com/assets/fonts/satoshi-${w}.woff2') format('woff2');}`).join("");
-
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark">
@@ -1043,44 +1047,100 @@ a{color:${GLASS.ink};}
   style="width:100%;border-collapse:collapse;background-color:#000000;background-image:radial-gradient(620px 420px at 92% -8%, rgba(255,255,255,0.10), rgba(255,255,255,0) 62%),radial-gradient(520px 380px at -8% 108%, rgba(255,255,255,0.07), rgba(255,255,255,0) 62%);">
 <tr><td align="center" style="padding:28px 12px;">
 <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;">
-
-  <tr><td class="pad" style="padding:30px 36px 0 36px;${f}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">Noir au Noir</td></tr>
-
-  <tr><td class="pad" style="padding:26px 36px 0 36px;${f}font-size:34px;line-height:1.1;font-weight:500;letter-spacing:-0.6px;color:${GLASS.ink};">${esc(greeting)}</td></tr>
-
-  <tr><td class="pad" style="padding:16px 36px 0 36px;${f}font-size:15px;line-height:1.7;color:${GLASS.dim};">${esc(line)}</td></tr>
-
-  <tr><td class="pad" style="padding:30px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${GLASS.pane}"
-      style="width:100%;border-collapse:separate;background-color:${GLASS.pane};border:1px solid ${GLASS.edge};border-top:1px solid ${GLASS.lip};border-radius:20px;">
-      <tr><td style="padding:24px 26px 6px 26px;${f}font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${GLASS.faint};">${esc(pane.label)}</td></tr>
-      <tr><td class="big" style="padding:0 26px 6px 26px;${f}font-size:30px;line-height:1.15;font-weight:500;letter-spacing:-0.5px;color:${GLASS.ink};">${esc(pane.big)}</td></tr>
-      <tr><td style="padding:0 26px 24px 26px;${f}font-size:13px;color:${GLASS.quiet};">${esc(pane.sub)}</td></tr>
-    </table>
-  </td></tr>
-
-  <tr><td class="pad" style="padding:28px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
-      <tr><td bgcolor="${GLASS.ink}" style="background-color:${GLASS.ink};border-radius:999px;">
-        <a href="${esc(button.url)}" style="display:inline-block;padding:15px 32px;${f}font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;border-radius:999px;">${esc(button.text)}</a>
-      </td></tr>
-    </table>
-  </td></tr>
-
-  <tr><td class="pad" style="padding:14px 36px 0 36px;${f}font-size:12px;color:${GLASS.faint};">${esc(button.url)}</td></tr>
-
-  <tr><td class="pad" style="padding:30px 36px 0 36px;${f}font-size:15px;line-height:1.7;color:${GLASS.dim};">${esc(closing)}</td></tr>
-
-  <tr><td class="pad" style="padding:34px 36px 36px 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
-      <tr><td style="padding:20px 0 0 0;${f}font-size:14px;font-weight:500;color:${GLASS.ink};">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${f}font-size:12px;line-height:1.7;color:${GLASS.faint};">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:${GLASS.quiet};text-decoration:underline;">${REPLY_TO}</a></td></tr>
-    </table>
-  </td></tr>
-
+${rows.join("\n")}
 </table>
 </td></tr></table>
 </body></html>`;
+}
+
+const glassKicker = () =>
+  `<tr><td class="pad" style="padding:30px 36px 0 36px;${gf()}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">Noir au Noir</td></tr>`;
+
+const glassHeading = (text) =>
+  `<tr><td class="pad" style="padding:26px 36px 0 36px;${gf()}font-size:34px;line-height:1.1;font-weight:500;letter-spacing:-0.6px;color:${GLASS.ink};">${esc(text)}</td></tr>`;
+
+/* `html` is inserted as it is: callers pass either escaped text or markup
+   they built themselves, never anything a stranger typed. */
+const glassText = (html, top = 16, color = GLASS.dim) =>
+  `<tr><td class="pad" style="padding:${top}px 36px 0 36px;${gf()}font-size:15px;line-height:1.7;color:${color};">${html}</td></tr>`;
+
+const glassLabel = (text, top = 32) =>
+  `<tr><td class="pad" style="padding:${top}px 36px 0 36px;${gf()}font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${GLASS.faint};">${esc(text)}</td></tr>`;
+
+/* The raised pane: a faint edge and a lighter line along its top, which is
+   what reads as glass once blur is off the table. `inner` is rows. */
+const glassPane = (inner, top = 30) =>
+  `<tr><td class="pad" style="padding:${top}px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${GLASS.pane}"
+      style="width:100%;border-collapse:separate;background-color:${GLASS.pane};border:1px solid ${GLASS.edge};border-top:1px solid ${GLASS.lip};border-radius:20px;">
+      ${inner}
+    </table>
+  </td></tr>`;
+
+const paneLabel = (text) =>
+  `<tr><td style="padding:24px 26px 6px 26px;${gf()}font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${GLASS.faint};">${esc(text)}</td></tr>`;
+
+const paneBig = (text, top = 0, bottom = 6) =>
+  `<tr><td class="big" style="padding:${top}px 26px ${bottom}px 26px;${gf()}font-size:30px;line-height:1.15;font-weight:500;letter-spacing:-0.5px;color:${GLASS.ink};">${esc(text)}</td></tr>`;
+
+const paneSmall = (html, bottom = 24, color = GLASS.quiet) =>
+  `<tr><td style="padding:0 26px ${bottom}px 26px;${gf()}font-size:14px;line-height:1.7;color:${color};">${html}</td></tr>`;
+
+const glassButton = (text, url, top = 28) =>
+  `<tr><td class="pad" style="padding:${top}px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+      <tr><td bgcolor="${GLASS.ink}" style="background-color:${GLASS.ink};border-radius:999px;">
+        <a href="${esc(url)}" style="display:inline-block;padding:15px 32px;${gf()}font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;border-radius:999px;">${esc(text)}</a>
+      </td></tr>
+    </table>
+  </td></tr>`;
+
+const glassUrl = (url) =>
+  `<tr><td class="pad" style="padding:14px 36px 0 36px;${gf()}font-size:12px;color:${GLASS.faint};">${esc(url)}</td></tr>`;
+
+/* Numbered or titled lines, for what is in a portal or what happens next. */
+function glassList(items, numbered) {
+  const rows = items.map(([title, text], i) => `
+    <tr>
+      ${numbered ? `<td width="34" valign="top" style="width:34px;padding:0 0 18px 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.faint};">${String(i + 1).padStart(2, "0")}</td>` : ""}
+      <td valign="top" style="padding:0 0 18px 0;${gf()}font-size:14px;line-height:1.6;color:${GLASS.ink};">
+        <strong style="font-weight:500;color:${GLASS.ink};">${esc(title || "")}</strong><br>
+        <span style="color:${GLASS.dim};">${esc(text || "")}</span>
+      </td>
+    </tr>`).join("");
+  return `<tr><td class="pad" style="padding:16px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">${rows}</table>
+  </td></tr>`;
+}
+
+/* The studio's own signature, or a plain line of small print. */
+const glassSignature = () =>
+  `<tr><td class="pad" style="padding:34px 36px 36px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
+      <tr><td style="padding:20px 0 0 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.ink};">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${gf()}font-size:12px;line-height:1.7;color:${GLASS.faint};">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:${GLASS.quiet};text-decoration:underline;">${REPLY_TO}</a></td></tr>
+    </table>
+  </td></tr>`;
+
+const glassFoot = (text) =>
+  `<tr><td class="pad" style="padding:32px 36px 36px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
+      <tr><td style="padding:18px 0 0 0;${gf()}font-size:12px;line-height:1.6;color:${GLASS.faint};">${esc(text)}</td></tr>
+    </table>
+  </td></tr>`;
+
+/* "Your reels are ready". */
+function glassMail({ greeting, line, pane, button, closing }) {
+  return glassShell([
+    glassKicker(),
+    glassHeading(greeting),
+    glassText(esc(line)),
+    glassPane(paneLabel(pane.label) + paneBig(pane.big) + paneSmall(esc(pane.sub), 24, GLASS.quiet)),
+    glassButton(button.text, button.url),
+    glassUrl(button.url),
+    glassText(esc(closing), 30),
+    glassSignature()
+  ]);
 }
 
 /* ============ THE EDGE COPY ============ */
@@ -3389,50 +3449,18 @@ async function mailWelcome(env, { to, who, client, plan }) {
 }
 
 function welcomeMailHtml({ greeting, line, brand, url, points, closing }) {
-  const cell = "font-family:Arial,Helvetica,sans-serif;";
-  const rows = points.map(([t, d]) => `
-    <tr>
-      <td valign="top" style="padding:0 0 16px 0;${cell}font-size:14px;line-height:1.6;color:#ffffff;">
-        <strong style="color:#ffffff;">${esc(t)}</strong><br>
-        <span style="color:#9a9a9a;">${esc(d)}</span>
-      </td>
-    </tr>`).join("");
-
-  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
-<tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
-  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
-  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(greeting)}</td></tr>
-  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(line)}</td></tr>
-  <tr><td style="padding:28px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
-      <tr><td style="padding:20px 24px 6px 24px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">Your portal</td></tr>
-      <tr><td style="padding:0 24px 18px 24px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(brand)}</td></tr>
-    </table>
-  </td></tr>
-  <tr><td style="padding:26px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-      <tr><td style="background-color:#ffffff;border-radius:999px;">
-        <a href="${esc(url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">Open your portal</a>
-      </td></tr>
-    </table>
-  </td></tr>
-  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:12px;color:#5e5e5e;">${esc(url)}</td></tr>
-  <tr><td style="padding:32px 36px 0 36px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">What is in there</td></tr>
-  <tr><td style="padding:16px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">${rows}</table>
-  </td></tr>
-  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(closing)}</td></tr>
-  <tr><td style="padding:30px 36px 32px 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
-      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
-    </table>
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  return glassShell([
+    glassKicker(),
+    glassHeading(greeting),
+    glassText(esc(line)),
+    glassPane(paneLabel("Your portal") + paneBig(brand, 0, 24)),
+    glassButton("Open your portal", url),
+    glassUrl(url),
+    points && points.length ? glassLabel("What is in there") : "",
+    points && points.length ? glassList(points, false) : "",
+    glassText(esc(closing), 14),
+    glassSignature()
+  ]);
 }
 
 /* Reads any JSON file out of a repo. */
@@ -3540,94 +3568,45 @@ async function emailClient(env, { proposal, to, name, chosen }) {
 }
 
 function clientMailHtml({ greeting, line, pack, steps, closing }) {
-  const cell = "font-family:Arial,Helvetica,sans-serif;";
-  const stepRows = steps.map((s, i) => `
-    <tr>
-      <td width="34" valign="top" style="width:34px;padding:0 0 18px 0;font-family:Georgia,'Times New Roman',serif;font-size:15px;color:#5e5e5e;">${String(i + 1).padStart(2, "0")}</td>
-      <td valign="top" style="padding:0 0 18px 0;${cell}font-size:14px;line-height:1.6;color:#ffffff;">
-        <strong style="color:#ffffff;">${esc(s.title || "")}</strong><br>
-        <span style="color:#9a9a9a;">${esc(s.text || "")}</span>
-      </td>
-    </tr>`).join("");
-
-  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
-<tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
-  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
-  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(greeting)}</td></tr>
-  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${line}</td></tr>
-  ${pack.name ? `<tr><td style="padding:28px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
-      <tr><td style="padding:22px 24px 6px 24px;font-family:Georgia,'Times New Roman',serif;font-size:24px;color:#ffffff;">${esc(pack.name)}</td></tr>
-      ${pack.tag ? `<tr><td style="padding:0 24px 4px 24px;${cell}font-size:14px;line-height:1.6;color:#9a9a9a;">${esc(pack.tag)}</td></tr>` : ""}
-      ${pack.price ? `<tr><td style="padding:12px 24px 22px 24px;${cell}font-size:14px;color:#ffffff;">${esc(pack.price)} <span style="color:#9a9a9a;">${esc(pack.per || "")}</span></td></tr>` : ""}
-    </table>
-  </td></tr>` : ""}
-  ${stepRows ? `<tr><td style="padding:34px 36px 0 36px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">What happens next</td></tr>
-  <tr><td style="padding:16px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">${stepRows}</table>
-  </td></tr>` : ""}
-  <tr><td style="padding:24px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(closing)}</td></tr>
-  <tr><td style="padding:30px 36px 32px 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
-      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
-    </table>
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  const packRows = pack.name
+    ? paneBig(pack.name, 24, pack.tag || pack.price ? 4 : 24) +
+      (pack.tag ? paneSmall(esc(pack.tag), pack.price ? 4 : 24, GLASS.dim) : "") +
+      (pack.price ? paneSmall(`<span style="color:${GLASS.ink};">${esc(pack.price)}</span> ${esc(pack.per || "")}`, 24, GLASS.quiet) : "")
+    : "";
+  return glassShell([
+    glassKicker(),
+    glassHeading(greeting),
+    // `line` is built by the caller from the proposal, not by a stranger
+    glassText(line, 16, GLASS.dim),
+    pack.name ? glassPane(packRows) : "",
+    steps && steps.length ? glassLabel("What happens next", 34) : "",
+    steps && steps.length ? glassList(steps.map((st) => [st.title, st.text]), true) : "",
+    glassText(esc(closing), 20),
+    glassSignature()
+  ]);
 }
 
-/* One shell every mail is poured into, so a second kind of mail is a
-   few lines rather than another wall of table markup. */
+/* One shell every other mail is poured into, so a new kind of mail is a
+   few lines rather than another wall of table markup. `lead` and
+   `detail.subHtml` are inserted as they are: callers build them, and
+   never from anything somebody else typed. */
 function mailHtml({ headline, lead, detail, quote, action, foot }) {
-  const cell = "font-family:Arial,Helvetica,sans-serif;";
-  return `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
-<tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
-  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
-  <tr><td style="padding:22px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:29px;line-height:1.15;color:#ffffff;">${esc(headline)}</td></tr>
-  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:15px;line-height:1.6;color:#9a9a9a;">${lead}</td></tr>
-  <tr><td style="padding:26px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
-      <tr><td style="padding:20px 22px 6px 22px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">${esc(detail.label)}</td></tr>
-      <tr><td style="padding:0 22px ${detail.sub || detail.subHtml ? "4px" : "20px"} 22px;font-family:Georgia,'Times New Roman',serif;font-size:22px;color:#ffffff;">${esc(detail.big)}</td></tr>
-      ${/* `sub` is plain text and gets escaped. `subHtml` is for a list
-            built here, such as three dates on three lines, and is the
-            caller's job to keep safe. Never hand it anything typed by
-            somebody else. */ ""}
-      ${detail.sub || detail.subHtml
-        ? `<tr><td style="padding:0 22px 20px 22px;${cell}font-size:14px;line-height:1.7;color:#9a9a9a;">${detail.subHtml || esc(detail.sub)}</td></tr>`
-        : ""}
-    </table>
-  </td></tr>
-  ${quote ? `<tr><td style="padding:22px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;">
-      <tr><td style="padding:0 0 6px 0;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">They added</td></tr>
-      <tr><td style="font-family:Georgia,'Times New Roman',serif;font-size:16px;line-height:1.6;font-style:italic;color:#ffffff;">&ldquo;${esc(quote)}&rdquo;</td></tr>
-    </table>
-  </td></tr>` : ""}
-  ${/* Optional. A reminder has nothing to click: the whole message is
-        that somebody will ring you tomorrow, and a button under that
-        only invites a second guess about what is being asked. */ ""}
-  ${action ? `<tr><td style="padding:30px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-      <tr><td style="background-color:#ffffff;border-radius:999px;">
-        <a href="${esc(action.url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">${esc(action.text)}</a>
-      </td></tr>
-    </table>
-  </td></tr>` : ""}
-  <tr><td style="padding:30px 36px 32px 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
-      <tr><td style="padding:16px 0 0 0;${cell}font-size:12px;line-height:1.6;color:#5e5e5e;">${esc(foot)}</td></tr>
-    </table>
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  const sub = detail.sub || detail.subHtml;
+  return glassShell([
+    glassKicker(),
+    glassHeading(headline),
+    glassText(lead, 14, GLASS.dim),
+    glassPane(
+      paneLabel(detail.label) +
+      paneBig(detail.big, 0, sub ? 6 : 24) +
+      (sub ? paneSmall(detail.subHtml || esc(detail.sub), 22, GLASS.quiet) : ""),
+      26),
+    quote ? glassLabel("They added", 26) : "",
+    quote ? glassText(`<span style="font-style:italic;color:${GLASS.ink};">&ldquo;${esc(quote)}&rdquo;</span>`, 8) : "",
+    // optional: a reminder has nothing to click
+    action ? glassButton(action.text, action.url, 30) : "",
+    glassFoot(foot)
+  ]);
 }
 
 function prettyDate(iso) {
