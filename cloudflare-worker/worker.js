@@ -1255,6 +1255,22 @@ async function liveCode(env, raw) {
   return { code: record.code, freeReels: record.freeReels, until: record.until };
 }
 
+/* What was picked on the reels page, kept on the booking so the
+   dashboard can turn it into a client without anything retyped. The
+   free reels come from the code as checked here, never from the page. */
+function cleanReels(raw, code) {
+  if (!raw || typeof raw !== "object") return null;
+  const count = Math.round(Number(raw.count));
+  if (!(count >= 1 && count <= 30)) return null;
+  return {
+    count,
+    free: code ? code.freeReels : 0,
+    day: /^\d{4}-\d{2}-\d{2}$/.test(String(raw.day || "")) ? String(raw.day) : "",
+    place: String(raw.place || "").trim().slice(0, 80),
+    price: Math.max(0, Math.min(1000, Number(raw.price) || 0))
+  };
+}
+
 function codeLine(record) {
   if (!record.code) return "";
   const c = record.code;
@@ -1810,6 +1826,7 @@ async function handleCall(request, env, ctx, cors) {
     }
 
     const code = await liveCode(env, body.code);
+    const reels = cleanReels(body.reels, code);
 
     const record = {
       id: slotId(date, time),
@@ -1818,6 +1835,7 @@ async function handleCall(request, env, ctx, cors) {
       invite: from || "",
       ref,
       code,
+      reels,
       /* A secret of its own, so the reminder can offer to move it.
          The id above is the date and the hour, which anybody could
          guess, and a move link built on that would let a stranger
@@ -1922,10 +1940,11 @@ async function handleCall(request, env, ctx, cors) {
     if (!phone) return json({ error: "bad phone" }, 400, cors);
 
     const code = await liveCode(env, body.code);
+    const reels = cleanReels(body.reels, code);
 
     const record = {
       id: newTransferId(),
-      name, email, phone, note: about, ref, code,
+      name, email, phone, note: about, ref, code, reels,
       done: false,
       at: new Date().toISOString()
     };
