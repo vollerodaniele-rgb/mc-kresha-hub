@@ -965,39 +965,13 @@ async function mailReady(env, { to, who, client, plan, month, films, pictures, f
       " ready. Watch them on your page, tap one for sound, and download the ones you want. They stay there."
     : "Everything from " + when + " is ready on your page: " + what + ", ready to download. It stays there.";
 
-  const cell = "font-family:Arial,Helvetica,sans-serif;";
-  const html = `<!doctype html><html><body style="margin:0;padding:0;background-color:#000000;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;background-color:#000000;">
-<tr><td align="center" style="padding:24px 12px;">
-<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;background-color:#000000;">
-  <tr><td style="padding:28px 36px 0 36px;${cell}font-size:11px;font-weight:bold;letter-spacing:3px;text-transform:uppercase;color:#9a9a9a;">Noir au Noir</td></tr>
-  <tr><td style="padding:24px 36px 0 36px;font-family:Georgia,'Times New Roman',serif;font-size:31px;line-height:1.12;color:#ffffff;">${esc(first ? "Hi " + first + "." : "Hello.")}</td></tr>
-  <tr><td style="padding:16px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">${esc(line)}</td></tr>
-  <tr><td style="padding:28px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border:1px solid #333333;">
-      <tr><td style="padding:20px 24px 6px 24px;${cell}font-size:10px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#5e5e5e;">${esc(reels ? "Ready to post" : "Ready to download")}</td></tr>
-      <tr><td style="padding:0 24px 4px 24px;font-family:Georgia,'Times New Roman',serif;font-size:28px;color:#ffffff;">${esc(what)}</td></tr>
-      <tr><td style="padding:0 24px 18px 24px;${cell}font-size:13px;color:#9a9a9a;">${esc(brand)} &middot; ${esc(when)}</td></tr>
-    </table>
-  </td></tr>
-  <tr><td style="padding:26px 36px 0 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:collapse;">
-      <tr><td style="background-color:#ffffff;border-radius:999px;">
-        <a href="${esc(url)}" style="display:inline-block;padding:13px 30px;${cell}font-size:12px;font-weight:bold;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;">${esc(reels ? "Watch and download" : "Open your delivery")}</a>
-      </td></tr>
-    </table>
-  </td></tr>
-  <tr><td style="padding:14px 36px 0 36px;${cell}font-size:12px;color:#5e5e5e;">${esc(url)}</td></tr>
-  <tr><td style="padding:26px 36px 0 36px;${cell}font-size:15px;line-height:1.65;color:#ffffff;">Anything you want changed, just reply to this mail.</td></tr>
-  <tr><td style="padding:30px 36px 32px 36px;">
-    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid #222222;">
-      <tr><td style="padding:18px 0 0 0;font-family:Georgia,'Times New Roman',serif;font-size:14px;color:#ffffff;">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${cell}font-size:12px;line-height:1.7;color:#5e5e5e;">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:#9a9a9a;text-decoration:underline;">${REPLY_TO}</a></td></tr>
-    </table>
-  </td></tr>
-</table>
-</td></tr></table>
-</body></html>`;
+  const html = glassMail({
+    greeting: first ? "Hi " + first + "." : "Hello.",
+    line,
+    pane: { label: reels ? "Ready to post" : "Ready to download", big: what, sub: brand + " \u00b7 " + when },
+    button: { text: reels ? "Watch and download" : "Open your delivery", url },
+    closing: "Anything you want changed, just reply to this mail."
+  });
 
   const text = [
     subject, "",
@@ -1023,6 +997,90 @@ async function mailReady(env, { to, who, client, plan, month, films, pictures, f
     console.log("ready mail error:", String(err));
     return false;
   }
+}
+
+/* ============ GLASS MAIL ============ */
+/* The house style, as far as mail allows. No mail app blurs, Gmail
+   drops web fonts and background gradients, and several strip anything
+   they do not understand, so the glass is built from what survives
+   everywhere: a raised dark pane, a faint edge with a lighter line along
+   its top, white type dimmed in the same steps as the site. Where the
+   app can do more (Apple Mail, iPhone) it gets Satoshi and the two soft
+   glows behind the page; everywhere else it gets the same layout on
+   plain black in the system font.
+
+   Colours are hex rather than rgba: they are the site's white at 70, 60
+   and 45 percent over black, worked out, because not every app
+   composites rgba. */
+const GLASS = {
+  ink: "#F2F2F2",
+  dim: "#A9A9A9",     // 70%
+  quiet: "#919191",   // 60%
+  faint: "#6D6D6D",   // 45%
+  pane: "#0D0D0D",    // 5% white over black
+  edge: "#1F1F1F",    // the pane's border
+  lip: "#383838",     // its lighter top line
+  rule: "#1A1A1A",
+  font: "'Satoshi', -apple-system, BlinkMacSystemFont, 'Helvetica Neue', Helvetica, Arial, sans-serif"
+};
+
+function glassMail({ greeting, line, pane, button, closing }) {
+  const f = "font-family:" + GLASS.font + ";";
+  const fonts = [400, 500, 700].map((w) =>
+    `@font-face{font-family:'Satoshi';font-weight:${w};font-style:normal;` +
+    `src:url('https://noiraunoir.com/assets/fonts/satoshi-${w}.woff2') format('woff2');}`).join("");
+
+  return `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark"><meta name="supported-color-schemes" content="dark">
+<style>${fonts}
+body{margin:0;padding:0;background:#000000;}
+a{color:${GLASS.ink};}
+@media (max-width:620px){.pad{padding-left:22px !important;padding-right:22px !important;}.big{font-size:26px !important;}}
+</style></head>
+<body style="margin:0;padding:0;background-color:#000000;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="#000000"
+  style="width:100%;border-collapse:collapse;background-color:#000000;background-image:radial-gradient(620px 420px at 92% -8%, rgba(255,255,255,0.10), rgba(255,255,255,0) 62%),radial-gradient(520px 380px at -8% 108%, rgba(255,255,255,0.07), rgba(255,255,255,0) 62%);">
+<tr><td align="center" style="padding:28px 12px;">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:600px;max-width:100%;border-collapse:collapse;">
+
+  <tr><td class="pad" style="padding:30px 36px 0 36px;${f}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">Noir au Noir</td></tr>
+
+  <tr><td class="pad" style="padding:26px 36px 0 36px;${f}font-size:34px;line-height:1.1;font-weight:500;letter-spacing:-0.6px;color:${GLASS.ink};">${esc(greeting)}</td></tr>
+
+  <tr><td class="pad" style="padding:16px 36px 0 36px;${f}font-size:15px;line-height:1.7;color:${GLASS.dim};">${esc(line)}</td></tr>
+
+  <tr><td class="pad" style="padding:30px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" bgcolor="${GLASS.pane}"
+      style="width:100%;border-collapse:separate;background-color:${GLASS.pane};border:1px solid ${GLASS.edge};border-top:1px solid ${GLASS.lip};border-radius:20px;">
+      <tr><td style="padding:24px 26px 6px 26px;${f}font-size:10px;font-weight:700;letter-spacing:3px;text-transform:uppercase;color:${GLASS.faint};">${esc(pane.label)}</td></tr>
+      <tr><td class="big" style="padding:0 26px 6px 26px;${f}font-size:30px;line-height:1.15;font-weight:500;letter-spacing:-0.5px;color:${GLASS.ink};">${esc(pane.big)}</td></tr>
+      <tr><td style="padding:0 26px 24px 26px;${f}font-size:13px;color:${GLASS.quiet};">${esc(pane.sub)}</td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td class="pad" style="padding:28px 36px 0 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="border-collapse:separate;">
+      <tr><td bgcolor="${GLASS.ink}" style="background-color:${GLASS.ink};border-radius:999px;">
+        <a href="${esc(button.url)}" style="display:inline-block;padding:15px 32px;${f}font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;color:#000000;text-decoration:none;border-radius:999px;">${esc(button.text)}</a>
+      </td></tr>
+    </table>
+  </td></tr>
+
+  <tr><td class="pad" style="padding:14px 36px 0 36px;${f}font-size:12px;color:${GLASS.faint};">${esc(button.url)}</td></tr>
+
+  <tr><td class="pad" style="padding:30px 36px 0 36px;${f}font-size:15px;line-height:1.7;color:${GLASS.dim};">${esc(closing)}</td></tr>
+
+  <tr><td class="pad" style="padding:34px 36px 36px 36px;">
+    <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
+      <tr><td style="padding:20px 0 0 0;${f}font-size:14px;font-weight:500;color:${GLASS.ink};">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${f}font-size:12px;line-height:1.7;color:${GLASS.faint};">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:${GLASS.quiet};text-decoration:underline;">${REPLY_TO}</a></td></tr>
+    </table>
+  </td></tr>
+
+</table>
+</td></tr></table>
+</body></html>`;
 }
 
 /* ============ THE EDGE COPY ============ */
