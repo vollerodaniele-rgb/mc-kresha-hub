@@ -4507,6 +4507,8 @@ async function watchUsage(env) {
     if (u.error) console.log("usage meter:", u.error);
     return;
   }
+  // one line per run, so the live log shows the meter reading
+  console.log("usage meter: " + u.requests + " requests today" + (u.month ? ", " + u.bytes + " bytes stored, " + u.objects + " files, " + u.classA + " writes, " + u.classB + " reads this month" : ""));
 
   const warnings = [];
   const check = async (name, used, of, period, what) => {
