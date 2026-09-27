@@ -94,6 +94,7 @@ export default {
        still run only in the first ten minutes of 05:00, 06:00 and 07:00
        UTC, exactly as when they had schedules of their own. */
     ctx.waitUntil(watchDeploys(env));
+    ctx.waitUntil(watchUsage(env));
     const hour = fired.getUTCHours();
     if (fired.getUTCMinutes() >= 10 || hour < 5 || hour > 7) return;
 
@@ -183,6 +184,7 @@ export default {
       if (url.pathname === "/codes") return listCodes(request, url, env, cors);
       if (url.pathname === "/people") return listPeople(request, url, env, cors);
       if (url.pathname === "/key") return keyInfo(request, env, cors);
+      if (url.pathname === "/usage") return usageFor(request, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
@@ -4228,11 +4230,13 @@ async function healthCheck(env, isMonday) {
   }
 
   if (isMonday) {
+    const usage = await readUsage(env, true);
     await telegram(env, [
       "<b>All good</b>",
       "",
       esc(String(repos.length)) + " repos reachable, submissions working.",
-      ...notes.map((n) => esc(n))
+      ...notes.map((n) => esc(n)),
+      ...usageLines(usage).map((l) => esc(l))
     ].join("\n"));
   }
 }
@@ -4370,6 +4374,180 @@ async function republish(headers, failedSha) {
     console.log("republish failed:", String(err));
     return false;
   }
+}
+
+/* ============ USAGE METER ============ */
+/* What keeps the bill at zero is staying inside the free allowances:
+   Workers Free stops at 100,000 requests a day (it refuses, it never
+   bills), and R2 is free up to 10 GB stored, a million writes and ten
+   million reads a month, and billed past that. This reads the real
+   numbers from Cloudflare's analytics and says so well before any of
+   them is close.
+
+   It needs a read only analytics key he makes himself, stored as the
+   secret CF_ANALYTICS_TOKEN. Without it everything here stays silent
+   and the admin says what to add. The account ID is not a secret: it
+   is in every dashboard address. */
+const CF_ACCOUNT = "86dbdda3d65af7cf00c3d6cd5067e0f1";
+const FREE = { requests: 100000, storageBytes: 10 * 1e9, classA: 1000000, classB: 10000000 };
+// warn once at each of these shares of an allowance
+const USAGE_STEPS = [0.7, 0.9];
+
+// how R2 bills each kind of call; deletes and the like are free
+const R2_CLASS_A = new Set(["ListBuckets", "PutBucket", "ListObjects", "ListObjectsV2", "PutObject", "CopyObject",
+  "CompleteMultipartUpload", "CreateMultipartUpload", "ListMultipartUploads", "UploadPart", "UploadPartCopy",
+  "ListParts", "PutBucketEncryption", "PutBucketCors", "PutBucketLifecycleConfiguration"]);
+const R2_CLASS_B = new Set(["HeadBucket", "HeadObject", "GetObject", "UsageSummary", "GetBucketEncryption",
+  "GetBucketLocation", "GetBucketCors", "GetBucketLifecycleConfiguration"]);
+
+/* Today's Workers requests (the allowance resets at 00:00 UTC), and,
+   when asked, R2 so far this month: what is stored and how many calls. */
+async function readUsage(env, withStorage) {
+  if (!env.CF_ANALYTICS_TOKEN) return { missing: true };
+  const now = new Date();
+  const dayStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const storageFrom = new Date(now.getTime() - 2 * 86400000);
+
+  const query = `query ($acct: string!, $day: Time!, $month: Time!, $recent: Time!, $now: Time!) {
+    viewer { accounts(filter: { accountTag: $acct }) {
+      workersInvocationsAdaptive(limit: 1000, filter: { datetime_geq: $day, datetime_leq: $now }) {
+        sum { requests errors }
+        dimensions { scriptName }
+      }
+      ${withStorage ? `
+      r2OperationsAdaptiveGroups(limit: 1000, filter: { datetime_geq: $month, datetime_leq: $now }) {
+        sum { requests }
+        dimensions { actionType }
+      }
+      r2StorageAdaptiveGroups(limit: 100, filter: { datetime_geq: $recent, datetime_leq: $now }) {
+        max { payloadSize metadataSize objectCount }
+        dimensions { bucketName }
+      }` : ""}
+    } }
+  }`;
+
+  let body;
+  try {
+    const res = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + env.CF_ANALYTICS_TOKEN, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        query,
+        variables: {
+          acct: CF_ACCOUNT, day: dayStart.toISOString(), month: monthStart.toISOString(),
+          recent: storageFrom.toISOString(), now: now.toISOString()
+        }
+      })
+    });
+    body = await res.json();
+    if (!res.ok && !body.errors) return { error: "Cloudflare answered " + res.status };
+  } catch (err) {
+    return { error: String(err) };
+  }
+  if (body.errors && body.errors.length) {
+    return { error: body.errors.map((e) => e.message).join("; ").slice(0, 300) };
+  }
+
+  const acct = body.data && body.data.viewer && body.data.viewer.accounts && body.data.viewer.accounts[0];
+  if (!acct) return { error: "the key cannot see this account" };
+
+  const scripts = {};
+  let requests = 0;
+  for (const g of acct.workersInvocationsAdaptive || []) {
+    const n = g.sum.requests || 0;
+    requests += n;
+    const name = g.dimensions.scriptName || "?";
+    scripts[name] = (scripts[name] || 0) + n;
+  }
+  const out = { day: dayStart.toISOString().slice(0, 10), requests, scripts };
+
+  if (withStorage) {
+    let classA = 0, classB = 0;
+    for (const g of acct.r2OperationsAdaptiveGroups || []) {
+      const t = g.dimensions.actionType;
+      if (R2_CLASS_A.has(t)) classA += g.sum.requests || 0;
+      else if (R2_CLASS_B.has(t)) classB += g.sum.requests || 0;
+    }
+    let bytes = 0, objects = 0;
+    // the largest reading per bucket over the last two days is what is stored now
+    for (const g of acct.r2StorageAdaptiveGroups || []) {
+      bytes += (g.max.payloadSize || 0) + (g.max.metadataSize || 0);
+      objects += g.max.objectCount || 0;
+    }
+    Object.assign(out, { month: monthStart.toISOString().slice(0, 7), classA, classB, bytes, objects });
+  }
+  return out;
+}
+
+const pct = (used, of) => Math.round((used / of) * 100);
+const gb = (bytes) => (bytes / 1e9).toFixed(bytes < 1e9 ? 2 : 1) + " GB";
+
+function usageLines(u) {
+  if (!u || u.missing) return [];
+  if (u.error) return ["Usage could not be read: " + u.error];
+  const lines = ["Requests today: " + u.requests.toLocaleString("en-GB") + " of 100,000 free (" + pct(u.requests, FREE.requests) + "%)."];
+  if (u.month) {
+    lines.push("Storage: " + gb(u.bytes) + " of 10 GB free (" + pct(u.bytes, FREE.storageBytes) + "%).");
+    lines.push("R2 this month: " + u.classA.toLocaleString("en-GB") + " writes of 1,000,000, " +
+      u.classB.toLocaleString("en-GB") + " reads of 10,000,000.");
+  }
+  return lines;
+}
+
+/* Every ten minutes: today's requests against the daily allowance.
+   Once a day, in the morning window: R2 against the monthly ones. Each
+   step (70%, then 90%) is said once per day or month, never repeated. */
+async function watchUsage(env) {
+  if (!env.CF_ANALYTICS_TOKEN || !env.DELIVERIES) return;
+  const now = new Date();
+  const morning = now.getUTCHours() === 5 && now.getUTCMinutes() < 10;
+  const u = await readUsage(env, morning);
+  if (u.missing || u.error) {
+    if (u.error) console.log("usage meter:", u.error);
+    return;
+  }
+
+  const warnings = [];
+  const check = async (name, used, of, period, what) => {
+    for (const step of [...USAGE_STEPS].reverse()) {
+      if (used / of < step) continue;
+      const key = "_told/usage/" + period + "-" + name + "-" + Math.round(step * 100);
+      if (await env.DELIVERIES.head(key)) return;
+      await env.DELIVERIES.put(key, new Date().toISOString());
+      warnings.push(what + " is at " + pct(used, of) + "% of the free allowance.");
+      return;
+    }
+  };
+
+  await check("requests", u.requests, FREE.requests, u.day,
+    "Today's Workers requests (" + u.requests.toLocaleString("en-GB") + " of 100,000)");
+  if (u.month) {
+    await check("storage", u.bytes, FREE.storageBytes, u.month, "R2 storage (" + gb(u.bytes) + " of 10 GB)");
+    await check("classA", u.classA, FREE.classA, u.month, "R2 writes this month");
+    await check("classB", u.classB, FREE.classB, u.month, "R2 reads this month");
+  }
+  if (!warnings.length) return;
+
+  const lines = [
+    ...warnings,
+    "Workers stop at the limit and never bill; the count resets at midnight UTC (01:00 in Belgium in winter, 02:00 in summer).",
+    "R2 past its free allowance does bill: $0.015 per GB a month, $4.50 per million writes, $0.36 per million reads.",
+    "Top workers today: " + Object.entries(u.scripts).sort((a, b) => b[1] - a[1]).slice(0, 3)
+      .map(([n, c]) => n + " " + c.toLocaleString("en-GB")).join(", ")
+  ];
+  const sent = await telegram(env, "<b>Usage climbing</b>\n\n" + lines.map((l) => esc(l)).join("\n"));
+  if (!sent) await alarmByMail(env, "Usage climbing", lines);
+}
+
+/* The admin's view of the same numbers. Guarded by the key like the
+   other studio routes, since which workers run is nobody else's business. */
+async function usageFor(request, env, cors) {
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) return json({ error: "that key cannot write to this studio" }, 403, cors);
+  const u = await readUsage(env, true);
+  return json(Object.assign({ free: FREE }, u), 200, cors);
 }
 
 /* ============ HIS KEY ============ */
