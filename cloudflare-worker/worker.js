@@ -1199,6 +1199,9 @@ async function serveDelivery(url, env, request, ctx) {
     return new Response("unknown file", { status: 400 });
   }
 
+  const range = request.headers.get("Range");
+  if (range) return servePart(env, deliveryKey(client, month, name), range);
+
   const held = await edgeHit(request);
   // download rather than open, and never under a name the URL invented
   if (held) return asDownload(held, name);
@@ -1211,10 +1214,55 @@ async function serveDelivery(url, env, request, ctx) {
   headers.set("etag", object.httpEtag);
   headers.set("Cache-Control", "public, max-age=" + EDGE_DELIVERY);
   headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Accept-Ranges", "bytes");
 
   const kept = new Response(object.body, { headers });
   edgeKeep(request, kept.clone(), ctx);
   return asDownload(kept, name);
+}
+
+/* A film played in a page, rather than downloaded, asks for itself in
+   pieces, and Safari on an iPhone plays nothing from a server that will
+   not answer in pieces. The pieces come straight from storage rather
+   than from the edge copy, which only ever holds the whole file. */
+async function servePart(env, key, header) {
+  const m = /^bytes=(\d*)-(\d*)$/.exec(String(header).trim());
+  if (!m || (m[1] === "" && m[2] === "")) return new Response("bad range", { status: 416 });
+
+  const range = m[1] === ""
+    ? { suffix: Number(m[2]) }
+    : m[2] === ""
+      ? { offset: Number(m[1]) }
+      : { offset: Number(m[1]), length: Number(m[2]) - Number(m[1]) + 1 };
+  if (range.length !== undefined && range.length < 1) return new Response("bad range", { status: 416 });
+
+  let object;
+  try {
+    object = await env.DELIVERIES.get(key, { range });
+  } catch {
+    // asked for bytes past the end
+    const head = await env.DELIVERIES.head(key);
+    if (!head) return new Response("not found", { status: 404 });
+    return new Response("bad range", { status: 416, headers: { "Content-Range": "bytes */" + head.size } });
+  }
+  if (!object) return new Response("not found", { status: 404 });
+
+  const size = object.size;
+  const start = object.range && "offset" in object.range ? object.range.offset
+    : range.suffix !== undefined ? Math.max(0, size - range.suffix) : range.offset;
+  const length = object.range && "length" in object.range ? object.range.length
+    : size - start;
+  const end = Math.min(size - 1, start + length - 1);
+
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("etag", object.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Content-Range", `bytes ${start}-${end}/${size}`);
+  headers.set("Content-Length", String(end - start + 1));
+  headers.set("Cache-Control", "private, max-age=" + EDGE_DELIVERY);
+  headers.set("Access-Control-Allow-Origin", "*");
+  return new Response(object.body, { status: 206, headers });
 }
 
 /* ============ REFERRAL PARTNERS ============ */
