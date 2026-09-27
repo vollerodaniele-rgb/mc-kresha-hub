@@ -172,6 +172,7 @@ export default {
       if (url.pathname === "/ref/board") return readBoard(url, env, cors);
       if (url.pathname === "/code") return checkCode(url, env, cors);
       if (url.pathname === "/codes") return listCodes(request, url, env, cors);
+      if (url.pathname === "/people") return listPeople(request, url, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
@@ -225,6 +226,10 @@ export default {
 
     if (new URL(request.url).pathname.startsWith("/code/")) {
       return handleCode(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname === "/people/remove") {
+      return removePerson(request, env, cors);
     }
 
     let data;
@@ -1493,6 +1498,91 @@ async function handlePartner(request, env, ctx, cors) {
   return json({ error: "unknown action" }, 404, cors);
 }
 
+/* ============ EVERYONE WHO FILLED IN A FORM ============ */
+/* A list he keeps: everybody who booked a call or asked to be rung, from
+   any page. It outlives the booking, which is cancelled, archived or
+   removed with its number, because the person is worth keeping after the
+   call is not.
+
+   One entry per person, not per submission: the same number, or failing
+   that the same address, is the same person, so a second booking updates
+   them and counts. Stored under _people/ in the bucket, which has no
+   public address; read and removed only with the key. Never in a repo:
+   those are public. */
+const PEOPLE_PREFIX = "_people/";
+const PEOPLE_DONE = "_people/_imported.json";
+
+async function personId(phone, email) {
+  const digits = String(phone || "").replace(/\D/g, "");
+  // the last nine digits, so +32 470 12 34 56 and 0470 12 34 56 are one
+  const basis = digits.length >= 8 ? "tel:" + digits.slice(-9) : "mail:" + String(email || "").trim().toLowerCase();
+  const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(basis));
+  return [...new Uint8Array(hash)].slice(0, 8).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+async function rememberPerson(env, record, source, at) {
+  try {
+    if (!env.DELIVERIES || !record) return;
+    if (!record.phone && !record.email) return;
+    const id = await personId(record.phone, record.email);
+    const key = PEOPLE_PREFIX + id + ".json";
+    const when = at || record.at || new Date().toISOString();
+    const known = (await readRecord(env, key)) || { id, first: when, count: 0, sources: [] };
+
+    // the newest details win, but an empty field never wipes a known one
+    known.name = String(record.name || known.name || "").slice(0, 80);
+    known.phone = String(record.phone || known.phone || "").slice(0, 30);
+    known.email = String(record.email || known.email || "").slice(0, 120);
+    if (record.ref) known.ref = record.ref;
+    if (!known.sources.includes(source)) known.sources.push(source);
+    known.count = (known.count || 0) + 1;
+    if (when < known.first) known.first = when;
+    if (!known.last || when > known.last) known.last = when;
+
+    await env.DELIVERIES.put(key, JSON.stringify(known), { httpMetadata: { contentType: "application/json" } });
+  } catch (err) {
+    console.log("could not remember a person:", String(err));
+  }
+}
+
+/* The first read files everybody already in the bookings and call-backs,
+   so the list starts complete instead of from today. Once. */
+async function importPeople(env) {
+  if (await readRecord(env, PEOPLE_DONE)) return;
+  const booked = await readBookings(env);
+  const asked = await readAsks(env);
+  for (const b of booked) await rememberPerson(env, b, b.reels ? "reels" : b.invite ? "invite" : "call", b.at);
+  for (const a of asked) await rememberPerson(env, a, a.reels ? "reels" : "callback", a.at);
+  await env.DELIVERIES.put(PEOPLE_DONE, JSON.stringify({ at: new Date().toISOString() }), {
+    httpMetadata: { contentType: "application/json" }
+  });
+}
+
+async function listPeople(request, url, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const key = url.searchParams.get("key") || request.headers.get("X-Studio-Key") || "";
+  if (!await mayWrite(env, key)) return json({ error: "no" }, 403, cors);
+
+  await importPeople(env);
+  const all = (await readAllRecords(env, PEOPLE_PREFIX)).filter((p) => p && p.id);
+  all.sort((a, b) => String(b.last).localeCompare(String(a.last)));
+  return json({ people: all }, 200, { ...cors, "Cache-Control": "no-store" });
+}
+
+async function removePerson(request, env, cors) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  let body;
+  try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) return json({ error: "that key cannot write to this studio" }, 403, cors);
+
+  const id = String(body.id || "");
+  if (!/^[0-9a-f]{16}$/.test(id)) return json({ error: "unknown person" }, 400, cors);
+  await env.DELIVERIES.delete(PEOPLE_PREFIX + id + ".json");
+  return json({ ok: true }, 200, cors);
+}
+
 /* ============ OFFER CODES ============ */
 /* A short code worth free reels, for a limited number of days. Made in
    the dashboard, handed out by hand, typed on the reels page or opened
@@ -2148,6 +2238,7 @@ async function handleCall(request, env, ctx, cors) {
     }
 
     ctx.waitUntil(confirmCall(env, record));
+    ctx.waitUntil(rememberPerson(env, record, record.reels ? "reels" : record.invite ? "invite" : "call"));
     return json({ ok: true }, 201, cors);
   }
 
@@ -2246,6 +2337,7 @@ async function handleCall(request, env, ctx, cors) {
     });
 
     ctx.waitUntil(confirmAsk(env, record));
+    ctx.waitUntil(rememberPerson(env, record, record.reels ? "reels" : "callback"));
     return json({ ok: true }, 201, cors);
   }
 
