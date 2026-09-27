@@ -88,6 +88,15 @@ export default {
   async scheduled(event, env, ctx) {
     const fired = new Date(event.scheduledTime);
 
+    /* One schedule, every ten minutes, instead of three fixed hours: the
+       free plan counts schedules per account, and the site's publishing
+       wants watching more often than once a day. The daily jobs below
+       still run only in the first ten minutes of 05:00, 06:00 and 07:00
+       UTC, exactly as when they had schedules of their own. */
+    ctx.waitUntil(watchDeploys(env));
+    const hour = fired.getUTCHours();
+    if (fired.getUTCMinutes() >= 10 || hour < 5 || hour > 7) return;
+
     /* Crons are UTC and Gent is not, so the brief fires on two of them
        and only speaks on the one where it is actually eight o'clock
        there. That is 06:00 UTC in summer and 07:00 in winter, and it
@@ -173,6 +182,7 @@ export default {
       if (url.pathname === "/code") return checkCode(url, env, cors);
       if (url.pathname === "/codes") return listCodes(request, url, env, cors);
       if (url.pathname === "/people") return listPeople(request, url, env, cors);
+      if (url.pathname === "/key") return keyInfo(request, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
       return listIdeas(url, env, cors);
@@ -4133,7 +4143,8 @@ async function healthCheck(env, isMonday) {
   const days = daysUntil(expiry);
   if (days !== null && days <= EXPIRY_WARNING_DAYS) {
     const when = days <= 0 ? "has expired" : "expires in " + days + " day" + (days === 1 ? "" : "s");
-    problems.push("The idea-box-relay token " + when + " (" + esc(expiry.slice(0, 10)) + "). Edit its expiry, do not regenerate it.");
+    problems.push("The idea-box-relay token " + when + " (" + esc(expiry.slice(0, 10)) + "). " +
+      "Regenerate it on GitHub with a new expiry, then paste the new value into the worker's GITHUB_TOKEN secret on Cloudflare.");
   } else if (days !== null) {
     notes.push("Token good for another " + days + " days.");
   }
@@ -4162,15 +4173,57 @@ async function healthCheck(env, isMonday) {
     }
   }
 
+  // the pages people are actually sent to, fetched the way a visitor would
+  for (const page of HEALTH_PAGES) {
+    try {
+      const res = await fetch(page, { headers: { "User-Agent": "noir-health-check" }, cf: { cacheTtl: 0 } });
+      if (!res.ok) problems.push(esc(page) + " answers " + res.status + ".");
+    } catch (err) {
+      problems.push(esc(page) + " could not be reached (" + esc(String(err)) + ").");
+    }
+  }
+
+  // the storage deliveries live in: a tiny file written, read back and removed
+  if (env.DELIVERIES) {
+    try {
+      const probe = "_health/probe.txt";
+      const stamp = String(Date.now());
+      await env.DELIVERIES.put(probe, stamp);
+      const back = await env.DELIVERIES.get(probe);
+      if (!back || (await back.text()) !== stamp) problems.push("File storage wrote a file but did not give it back.");
+      await env.DELIVERIES.delete(probe);
+    } catch (err) {
+      problems.push("File storage failed (" + esc(String(err)) + "). Deliveries and portals cannot load films.");
+    }
+  } else {
+    problems.push("File storage is not connected to the worker. Deliveries cannot load.");
+  }
+
+  // Telegram is where every alarm goes, so it gets checked too, and a
+  // broken Telegram is reported by mail instead
+  let telegramOk = true;
+  if (env.TELEGRAM_BOT_TOKEN) {
+    try {
+      const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getMe`);
+      telegramOk = res.ok;
+    } catch {
+      telegramOk = false;
+    }
+  } else {
+    telegramOk = false;
+  }
+  if (!telegramOk) problems.push("Telegram refused the bot token, so bookings and alarms are not reaching your phone.");
+
   if (problems.length) {
-    await telegram(env, [
+    const sent = telegramOk && await telegram(env, [
       "<b>Something is broken</b>",
       "",
       ...problems.map((p) => "• " + p),
       "",
-      "Pages still look fine, which is why this needs doing today.",
+      "Pages may still look fine, which is why this needs doing today.",
       "https://dash.cloudflare.com"
     ].join("\n"));
+    if (!sent) await alarmByMail(env, "Something is broken", problems);
     return;
   }
 
@@ -4181,6 +4234,161 @@ async function healthCheck(env, isMonday) {
       esc(String(repos.length)) + " repos reachable, submissions working.",
       ...notes.map((n) => esc(n))
     ].join("\n"));
+  }
+}
+
+/* The pages that matter if they are down: the booking page every link
+   points at, the reels page, and the admin he works from. */
+const HEALTH_PAGES = [
+  "https://noiraunoir.com/call/",
+  "https://noiraunoir.com/reels/",
+  "https://noiraunoir.com/admin/"
+];
+
+/* When Telegram itself is the thing that broke, the alarm has to go
+   another way. Plain text on purpose: it is for him, and it must
+   arrive even if everything fancy is failing. */
+async function alarmByMail(env, subject, lines) {
+  if (!env.RESEND_API_KEY || !env.MAIL_TO) {
+    console.log("alarm could not be sent anywhere: " + subject + ": " + lines.join(" | "));
+    return false;
+  }
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: { "Authorization": "Bearer " + env.RESEND_API_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: env.MAIL_FROM || DEFAULT_FROM,
+        to: [env.MAIL_TO],
+        subject: "Noir au Noir: " + subject,
+        // the lines were written for Telegram, so its markup comes off
+        text: lines.map((l) => "- " + String(l).replace(/<[^>]+>/g, "").replace(/&amp;/g, "&")).join("\n") +
+          "\n\nSent by the relay because Telegram could not be used."
+      })
+    });
+    return res.ok;
+  } catch (err) {
+    console.log("alarm mail failed:", String(err));
+    return false;
+  }
+}
+
+/* ============ DEPLOY WATCH ============ */
+/* Saving from the admin commits to the repo, and GitHub Pages then
+   publishes it. Twice that second step failed without a word: the save
+   said done, the site kept the old version, and nobody knew until it
+   was checked by hand. What fixed it both times was simply publishing
+   again. So every ten minutes this looks at the last publish; a failed
+   one is published again straight away, quietly, and only a second
+   failure, or a publish stuck for over forty minutes, reaches him. */
+const DEPLOY_WORKFLOW = "pages build and deployment";
+const REPUBLISH_MESSAGE = "Publish again: the last publish failed";
+const STUCK_MINUTES = 40;
+
+async function watchDeploys(env) {
+  if (!env.GITHUB_TOKEN || !env.DELIVERIES) return;
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box"
+  };
+
+  let run;
+  try {
+    const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}/actions/runs?per_page=10`, { headers });
+    if (!res.ok) return; // GitHub having a moment is not an alarm; the next look is ten minutes away
+    run = ((await res.json()).workflow_runs || []).find((r) => r.name === DEPLOY_WORKFLOW);
+  } catch {
+    return;
+  }
+  if (!run) return;
+
+  const told = "_told/deploy/" + run.id;
+  const already = async () => !!(await env.DELIVERIES.head(told));
+  const remember = (what) => env.DELIVERIES.put(told, JSON.stringify({ what, at: new Date().toISOString() }));
+
+  if (run.status === "completed" && run.conclusion === "failure") {
+    if (await already()) return;
+    const ours = String(run.head_commit && run.head_commit.message || "").startsWith(REPUBLISH_MESSAGE);
+    if (!ours) {
+      const again = await republish(headers, run.head_sha);
+      await remember(again ? "republished" : "could not republish");
+      if (again) return; // it will most likely go through; if not, the next failure is ours and he hears
+    } else {
+      await remember("failed twice");
+    }
+    const lines = [
+      "The site did not publish" + (ours ? ", twice. Publishing again did not help." : ", and publishing again could not be started."),
+      "The last save is in the repo but not on noiraunoir.com yet.",
+      "Open the run on GitHub, or ask Claude to look: " + run.html_url
+    ];
+    const sent = await telegram(env, "<b>Site not published</b>\n\n" + lines.map((l) => esc(l)).join("\n"));
+    if (!sent) await alarmByMail(env, "Site not published", lines);
+    return;
+  }
+
+  if (run.status !== "completed" && Date.now() - Date.parse(run.created_at) > STUCK_MINUTES * 60000) {
+    if (await already()) return;
+    await remember("stuck");
+    const lines = [
+      "The site has been publishing for over " + STUCK_MINUTES + " minutes, which normally takes one or two.",
+      run.html_url
+    ];
+    const sent = await telegram(env, "<b>Site publish stuck</b>\n\n" + lines.map((l) => esc(l)).join("\n"));
+    if (!sent) await alarmByMail(env, "Site publish stuck", lines);
+  }
+}
+
+/* An empty commit on main: nothing changes, but Pages publishes again.
+   If something else lands on main at the same moment, that commit
+   publishes too, which is just as good. */
+async function republish(headers, failedSha) {
+  const api = `https://api.github.com/repos/${CLIENTS_REPO}/git`;
+  try {
+    const ref = await fetch(api + "/ref/heads/main", { headers }).then((r) => r.ok ? r.json() : null);
+    if (!ref) return false;
+    const head = await fetch(api + "/commits/" + ref.object.sha, { headers }).then((r) => r.ok ? r.json() : null);
+    if (!head) return false;
+    const made = await fetch(api + "/commits", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        message: REPUBLISH_MESSAGE + " (" + String(failedSha).slice(0, 7) + ")",
+        tree: head.tree.sha,
+        parents: [ref.object.sha]
+      })
+    }).then((r) => r.ok ? r.json() : null);
+    if (!made) return false;
+    const moved = await fetch(api + "/refs/heads/main", {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({ sha: made.sha })
+    });
+    // 422 means main moved on in the meantime, and that newer commit publishes anyway
+    return moved.ok || moved.status === 422;
+  } catch (err) {
+    console.log("republish failed:", String(err));
+    return false;
+  }
+}
+
+/* ============ HIS KEY ============ */
+/* The admin cannot see when its own key expires: GitHub sends the date
+   only in a header browsers are not allowed to read. So the admin asks
+   here, the relay asks GitHub with that key, and hands back the date.
+   The key is used for this one call and kept nowhere. */
+async function keyInfo(request, env, cors) {
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  try {
+    const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
+      headers: { "Authorization": "Bearer " + key, "Accept": "application/vnd.github+json", "User-Agent": "mc-kresha-idea-box" }
+    });
+    if (res.status === 401) return json({ ok: false, why: "refused" }, 200, cors);
+    const expires = res.headers.get("github-authentication-token-expiration") || "";
+    return json({ ok: res.ok, expires: expires.slice(0, 10), days: daysUntil(expires) }, 200, cors);
+  } catch {
+    return json({ error: "could not ask GitHub" }, 502, cors);
   }
 }
 

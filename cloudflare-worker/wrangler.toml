@@ -12,7 +12,9 @@ workers_dev = true
 # speaks on that one. Cloudflare crons are always UTC, so this is how
 # a fixed local hour is held across the changeover.
 [triggers]
-crons = ["0 5 * * *", "0 6 * * *", "0 7 * * *"]
+# every ten minutes: the deploy watch runs each time, the daily jobs
+# only in the first ten minutes of 05, 06 and 07 UTC (see scheduled())
+crons = ["*/10 * * * *"]
 
 # Finished work for clients. Private: nothing in here has a public
 # address, the worker hands out links that expire instead.
