@@ -11,6 +11,8 @@
      TELEGRAM_CHAT_ID    optional, which chat to ping
    ------------------------------------------------------------ */
 
+import { WorkerEntrypoint } from "cloudflare:workers";
+
 const SITES = {
   kresha: {
     repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea",
@@ -82,6 +84,62 @@ const ALLOWED_ORIGINS = [
   "https://proposal.noiraunoir.com",
   "http://localhost:4176"
 ];
+
+/* ============ THE PLATFORM'S MAIL ============ */
+/* The platform (noir-platform, a separate worker) signs people in with
+   a link by email. Rather than holding a second Resend key, it asks
+   this worker to send, through a service binding: a private door with
+   no address on the web, so only a worker bound to it can use it. It
+   still only sends one kind of mail, and only with a link back to the
+   platform itself, so even a mistake there cannot turn this into a way
+   to mail anything to anyone. */
+const PLATFORM_ORIGIN = "https://noir-platform.vollerodaniele.workers.dev";
+
+export class PlatformMail extends WorkerEntrypoint {
+  async signIn({ to, link, studio, invite }) {
+    const env = this.env;
+    to = String(to || "").trim().toLowerCase();
+    link = String(link || "");
+    studio = String(studio || "").replace(/\s+/g, " ").trim().slice(0, 60) || "your studio";
+    if (!/^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/.test(to)) return false;
+    if (!link.startsWith(PLATFORM_ORIGIN + "/auth/finish?t=")) return false;
+    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+      console.log("platform mail skipped: RESEND_API_KEY or MAIL_FROM missing");
+      return false;
+    }
+
+    const subject = invite ? "Your studio on Noir au Noir: " + studio : "Your sign-in link";
+    const line = invite
+      ? "Noir au Noir has set up " + studio + " for you. Tap below to sign in and add your first clients. The link works once, for 7 days."
+      : "Tap below to sign in to " + studio + ". The link works once, for 20 minutes.";
+    const closing = invite
+      ? "No password to remember: whenever you want to sign in again, type your email and a new link arrives."
+      : "Didn't ask for this? Ignore it. Nobody can sign in without this mail.";
+
+    const html = glassShell([
+      glassKicker(),
+      glassHeading(invite ? "You're invited." : "Sign in."),
+      glassText(esc(line)),
+      glassButton(invite ? "Open your studio" : "Sign in", link),
+      glassText(esc(closing), 30),
+      glassSignature()
+    ]);
+    const text = [subject, "", line, "", link, "", closing, "", "Noir au Noir", REPLY_TO].join("\n");
+
+    try {
+      const res = await fetch(RESEND_ENDPOINT, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(), "Content-Type": "application/json" },
+        body: JSON.stringify({ from: env.MAIL_FROM, to: [to], reply_to: REPLY_TO, subject, html, text })
+      });
+      if (!res.ok) console.log("platform mail failed:", res.status, await res.text());
+      return res.ok;
+    } catch (err) {
+      console.log("platform mail error:", String(err));
+      return false;
+    }
+  }
+}
 
 export default {
   /* Runs on the cron in wrangler.toml, not on a request. */
