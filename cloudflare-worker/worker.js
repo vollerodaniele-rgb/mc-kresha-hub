@@ -1,14 +1,24 @@
-/* Idea Box relay for MC Kresha Project HQ
+/* The relay (kresha-idea-box)
    ------------------------------------------------------------
-   Runs as a Cloudflare Worker (free tier). Receives ideas from
-   the website form and files them as GitHub issues labeled
-   "idea", so they appear on the site like any other idea.
+   The studio's one server, a Cloudflare Worker on the free plan.
+   It began as the MC Kresha idea box and now does everything the
+   static sites cannot: idea boxes and client requests (as GitHub
+   issues), bookings and call links, deliveries and transfers in
+   R2, mail, Telegram, partner boards, offer codes, contacts, the
+   morning checks and brief, the usage meter, the calendar feed,
+   and the private doors the platform (noir-platform) uses.
 
    Secrets (set in the Worker's settings, never in code):
-     GITHUB_TOKEN        fine-grained GitHub token, issues and
-                         contents on the repos below
-     TELEGRAM_BOT_TOKEN  optional, to be pinged on every submission
-     TELEGRAM_CHAT_ID    optional, which chat to ping
+     GITHUB_TOKEN            fine-grained token: issues and contents
+                             on the repos in SITES. The platform's
+                             Money and Contacts also need it to reach
+                             studio-private (read and write).
+     TELEGRAM_BOT_TOKEN      the bot that pings him
+     TELEGRAM_CHAT_ID        his chat with it
+     RESEND_API_KEY          mail
+     MAIL_FROM, MAIL_TO      who mail comes from, where his copies go
+     CF_ANALYTICS_TOKEN      read only, for the usage meter
+     PLATFORM_TICKET_SECRET  shared with noir-platform, signs its passes
    ------------------------------------------------------------ */
 
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -17,10 +27,6 @@ const SITES = {
   kresha: {
     repo: "vollerodaniele-rgb/mc-kresha-hub", label: "idea",
     name: "idea on Last Chapter", url: "https://kresha.noiraunoir.com/admin.html"
-  },
-  sakas: {
-    repo: "vollerodaniele-rgb/sakas-portal", label: "idea",
-    name: "request from the Sakas portal", url: "https://sakas.noiraunoir.com/admin.html"
   },
   sakasidea: {
     repo: "vollerodaniele-rgb/sakas-idea", label: "idea",
