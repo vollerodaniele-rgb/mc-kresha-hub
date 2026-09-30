@@ -3,21 +3,19 @@ main = "worker.js"
 compatibility_date = "2026-08-01"
 workers_dev = true
 
-# 05:00 UTC is the health check. It is 07:00 in Gent in summer and
-# 06:00 in winter; drifting by an hour does not matter for a check
-# that is silent unless something is wrong.
-#
-# 06:00 and 07:00 are the morning brief, which does matter: one of the
-# two is 08:00 in Gent whatever the time of year, and the worker only
-# speaks on that one. Cloudflare crons are always UTC, so this is how
-# a fixed local hour is held across the changeover.
+# One schedule, every ten minutes. The deploy watch and the usage meter
+# run each time. The daily jobs run in the first ten minutes of 05, 06
+# and 07 UTC: the morning brief on whichever of 06 and 07 is 08:00 in
+# Gent (crons are UTC, so this holds across the clock change), the health
+# check on the other two. See scheduled() in worker.js.
 [triggers]
-# every ten minutes: the deploy watch runs each time, the daily jobs
-# only in the first ten minutes of 05, 06 and 07 UTC (see scheduled())
 crons = ["*/10 * * * *"]
 
-# Finished work for clients. Private: nothing in here has a public
-# address, the worker hands out links that expire instead.
+# Finished work for clients, transfers, and the relay's small records.
+# The bucket has no public address of its own (r2.dev is off): files
+# reach people only through the worker, /file and /thumb for deliveries
+# (open to anyone who knows the client, month and name) and transfer
+# links, which expire.
 [[r2_buckets]]
 binding = "DELIVERIES"
 bucket_name = "noir-deliveries"

@@ -1,67 +1,47 @@
-# Idea Box relay: no-login submissions
+# The relay (kresha-idea-box)
 
-This tiny script lets fans drop ideas straight on the website, no GitHub account needed.
-It runs on Cloudflare Workers (free, no credit card) and files each idea as a GitHub
-issue labeled `idea`, so ideas show up on the site exactly like before.
+The studio's one server: a Cloudflare Worker on the free plan. It began
+as the no-login idea box for this site and now does everything the
+static sites cannot: idea boxes and client requests (as GitHub issues),
+bookings and call links, deliveries and file transfers in R2, mail,
+Telegram, partner boards, offer codes, contacts, the morning checks, the
+usage meter, the calendar feed, and the private doors the studio
+platform (noir-platform) uses. `worker.js` explains each part where it
+is written.
 
-Setup takes about 10 minutes, one time.
+## Deploying
 
-## 1. Create the GitHub access key (fine-grained token)
+From this folder, signed in to Cloudflare with wrangler:
 
-1. On github.com go to **Settings (your account) > Developer settings > Personal access tokens > Fine-grained tokens > Generate new token**.
-2. Name: `idea-box-relay`. Expiration: pick 1 year (put a reminder to renew).
-3. Repository access: **Only select repositories** > choose `mc-kresha-hub`.
-4. Permissions > Repository permissions > **Issues: Read and write** AND
-   **Contents: Read and write** (the second one is what lets people attach pictures and voice messages;
-   uploads go to the `uploads` branch, so the website is never rebuilt by an upload).
-5. Generate, and copy the token (starts with `github_pat_`). Keep it somewhere safe for step 3; treat it like a password.
+    npx wrangler deploy
 
-## 2. Create the Worker
+Never paste the code into the dashboard editor: the bindings below live
+in `wrangler.toml` and a dashboard edit would drop them.
 
-1. Sign up free at https://dash.cloudflare.com (email + password, no card).
-2. In the dashboard: **Workers & Pages > Create > Create Worker**.
-3. Give it a name like `kresha-idea-box`, click **Deploy** (it deploys a hello-world first).
-4. Click **Edit code**, delete everything, paste the full contents of `worker.js` from this folder, then **Deploy**.
+## What it is bound to (wrangler.toml)
 
-## 3. Add the token as a secret
+- `DELIVERIES`: the R2 bucket `noir-deliveries` (deliveries, transfers
+  and the small records: bookings, contacts, partners, codes)
+- `READ_RATE`, `WRITE_RATE`: per address request budgets
+- one schedule, every ten minutes; the daily jobs run inside it at fixed
+  hours (see `scheduled()`)
 
-1. Back on the Worker's page: **Settings > Variables and Secrets > Add**.
-2. Type: **Secret**. Name: `GITHUB_TOKEN` (exactly that). Value: paste the token from step 1.
-3. Save and deploy.
+## Secrets (Settings, Variables and Secrets; never in code)
 
-## 4. Connect the website
+- `GITHUB_TOKEN`: fine-grained, Issues and Contents read and write on the
+  repos in `SITES`, and Contents on `studio-private` for the platform
+- `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+- `RESEND_API_KEY`, `MAIL_FROM`, `MAIL_TO`
+- `CF_ANALYTICS_TOKEN`: read only, for the usage meter
+- `PLATFORM_TICKET_SECRET`: shared with noir-platform
 
-1. Copy the Worker URL shown on its overview page, like `https://kresha-idea-box.YOUR-SUBDOMAIN.workers.dev`.
-2. In the repo, edit `app.js` and paste it into `CONFIG.submitUrl`:
-   ```js
-   submitUrl: "https://kresha-idea-box.YOUR-SUBDOMAIN.workers.dev"
-   ```
-3. Commit. A minute later the form appears in the Idea Box on the live site.
+A missing Telegram or mail secret switches that part off quietly; the
+morning check reports anything that stops working, including a GitHub
+token close to expiry.
 
-## How spam is handled
+## Spam and safety
 
-- A hidden honeypot field silently swallows most bots.
-- Ideas must be 10 to 1000 characters.
-- Every idea is just a GitHub issue: close it and it disappears from the site.
-- If spam ever gets bad, ask Claude to add moderation mode (ideas wait in an
-  inbox until you approve them) or Cloudflare Turnstile (a free, invisible
-  human check).
-
-## Safety notes
-
-- The token can ONLY create/edit issues on this one repo, nothing else.
-- It lives as a secret inside Cloudflare, never in the website code or the repo.
-- If it ever leaks, revoke it on GitHub (Developer settings > tokens) and make a new one.
-
-## Telegram notifications (optional)
-
-Get a message the moment anyone submits, on any of the three sites.
-
-1. In Telegram, message **@BotFather**, send `/newbot`, pick a name. He replies with a bot token.
-2. On the worker: **Settings > Variables and Secrets > Add**, type Secret, name `TELEGRAM_BOT_TOKEN`, paste the token, deploy.
-3. Open your new bot in Telegram and send it any message (say hello). This is what lets it write to you.
-4. Visit `https://kresha-idea-box.vollerodaniele.workers.dev/telegram-setup`. It returns your chat id.
-5. Add that as a second secret named `TELEGRAM_CHAT_ID`, deploy.
-
-The setup helper switches itself off once the chat id is stored, and never exposes the bot token.
-If either secret is missing, submissions carry on exactly as before, just without the ping.
+- Idea forms have a hidden honeypot field and a length limit, and every
+  address has a request budget per minute.
+- An idea is just an issue: close it and it leaves the site.
+- If a key leaks, regenerate it where it was made and replace the secret.
