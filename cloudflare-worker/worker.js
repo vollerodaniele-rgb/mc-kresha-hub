@@ -625,7 +625,10 @@ export default {
       return json({ ok: true }, 201, cors);
     }
 
-    const site = SITES[data.site] ? data.site : DEFAULT_SITE;
+    // every page names its site; a name that is not one of ours is refused
+    // rather than quietly filed on the default wall
+    if (data.site && !SITES[data.site]) return json({ error: "unknown site" }, 400, cors);
+    const site = data.site || DEFAULT_SITE;
     const { repo, label, perClient } = SITES[site];
 
     const rawClient = String(data.client || "");
