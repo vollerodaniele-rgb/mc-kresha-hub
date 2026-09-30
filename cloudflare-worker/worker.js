@@ -265,6 +265,164 @@ export class PlatformRepo extends WorkerEntrypoint {
   }
 }
 
+/* ============ THE CALENDAR FEED ============ */
+/* Everything with a time on it, as a calendar his phone subscribes to:
+   every client's next shoot, every booked call, and the times offered
+   in call links nobody has picked yet (marked tentative, so they do not
+   block the day). Posts are left out; a phone calendar is for where to
+   be, not what goes online.
+
+   The address carries a long random key, kept in storage, and anyone
+   holding the address can read the feed, so it is only ever shown in
+   the admin. A new key makes the old address stop working. The feed is
+   kept at the edge for ten minutes, so a phone asking often costs next
+   to nothing. */
+const FEED_KEY = "_calendar/feed.json";
+const FEED_TTL = 600;
+const FEED_TZ = "Europe/Brussels";
+
+async function feedKey(env, fresh) {
+  if (!fresh) {
+    const held = await readRecord(env, FEED_KEY);
+    if (held && held.key) return held.key;
+  }
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const key = btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  await env.DELIVERIES.put(FEED_KEY, JSON.stringify({ key, made: new Date().toISOString() }));
+  return key;
+}
+
+async function calendarLink(request, env, cors, fresh) {
+  if (!env.DELIVERIES) return json({ error: "storage is not connected" }, 503, cors);
+  const key = request.headers.get("X-Studio-Key") || "";
+  if (!key) return json({ error: "no key" }, 401, cors);
+  if (!await mayWrite(env, key)) return json({ error: "that key cannot write to this studio" }, 403, cors);
+  const k = await feedKey(env, fresh);
+  const https = new URL(request.url).origin + "/calendar.ics?k=" + k;
+  return json({ https, webcal: https.replace(/^https:/, "webcal:") }, 200, cors);
+}
+
+/* Text inside a calendar line: commas, semicolons, backslashes and
+   line breaks are escaped, and long lines folded at 75 characters. */
+const icsText = (v) => String(v == null ? "" : v).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
+
+function feedFold(line) {
+  const out = [];
+  let rest = line;
+  while (rest.length > 74) { out.push(rest.slice(0, 74)); rest = " " + rest.slice(74); }
+  out.push(rest);
+  return out.join("\r\n");
+}
+
+// "2026-10-14" and "16:30" as a local calendar stamp, and the same moved on by minutes
+function icsLocal(date, time, plusMinutes) {
+  const [y, m, d] = date.split("-").map(Number);
+  const [hh, mm] = (time || "00:00").split(":").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d, hh, mm + (plusMinutes || 0)));
+  const two = (n) => String(n).padStart(2, "0");
+  return t.getUTCFullYear() + two(t.getUTCMonth() + 1) + two(t.getUTCDate()) + "T" + two(t.getUTCHours()) + two(t.getUTCMinutes()) + "00";
+}
+const icsDay = (date, plusDays) => {
+  const [y, m, d] = date.split("-").map(Number);
+  const t = new Date(Date.UTC(y, m - 1, d + (plusDays || 0)));
+  return t.toISOString().slice(0, 10).replace(/-/g, "");
+};
+
+function icsEvent({ uid, date, time, minutes, summary, location, description, tentative }) {
+  const lines = ["BEGIN:VEVENT", "UID:" + uid, "DTSTAMP:" + new Date().toISOString().replace(/[-:]/g, "").slice(0, 15) + "Z"];
+  if (time) {
+    lines.push("DTSTART;TZID=" + FEED_TZ + ":" + icsLocal(date, time));
+    lines.push("DTEND;TZID=" + FEED_TZ + ":" + icsLocal(date, time, minutes || 60));
+  } else {
+    lines.push("DTSTART;VALUE=DATE:" + icsDay(date), "DTEND;VALUE=DATE:" + icsDay(date, 1));
+  }
+  lines.push("SUMMARY:" + icsText(summary));
+  if (location) lines.push("LOCATION:" + icsText(location));
+  if (description) lines.push("DESCRIPTION:" + icsText(description));
+  if (tentative) lines.push("STATUS:TENTATIVE", "TRANSP:TRANSPARENT");
+  lines.push("END:VEVENT");
+  return lines.map(feedFold).join("\r\n");
+}
+
+async function serveCalendar(url, env, request, ctx) {
+  if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
+  const held = await readRecord(env, FEED_KEY);
+  const asked = String(url.searchParams.get("k") || "");
+  if (!held || !held.key || asked.length !== held.key.length || asked !== held.key) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const kept = await edgeHit(request);
+  if (kept) return kept;
+
+  const events = [];
+  // calls from two months back, so the phone keeps a little history
+  const since = new Date(Date.now() - 60 * 86400000).toISOString().slice(0, 10);
+
+  for (const b of await readBookings(env)) {
+    if (!b.date || b.date < since) continue;
+    events.push(icsEvent({
+      uid: "call-" + (b.id || b.date + b.time) + "@noiraunoir.com",
+      date: b.date, time: b.time, minutes: Number(b.minutes) || 30,
+      summary: "Call: " + (b.name || "someone"),
+      description: [b.phone, b.email, b.note ? "\u201c" + b.note + "\u201d" : "", b.reels ? "Reels: " + (b.reels.count || "") + " " + (b.reels.date || "") : ""]
+        .filter(Boolean).join("\n")
+    }));
+  }
+
+  for (const inv of await listInvites(env)) {
+    if (inv.booked || inv.mode === "hours") continue;
+    for (const slot of inv.slots || []) {
+      const date = typeof slot === "string" ? slot.slice(0, 10) : slot.date;
+      const time = typeof slot === "string" ? slot.slice(11, 16) : slot.time;
+      if (!date || date < since) continue;
+      events.push(icsEvent({
+        uid: "offer-" + (inv.id || inv.name) + "-" + date + (time || "") + "@noiraunoir.com",
+        date, time, minutes: Number(inv.minutes) || 20, tentative: true,
+        summary: "Offered to " + (inv.name || "someone") + "?",
+        description: "One of the times in their call link. It goes when they pick one."
+      }));
+    }
+  }
+
+  for (const { name, plan } of await clientPlans(env)) {
+    if (plan.rolling || plan.notice) continue; // the example portals
+    const shoot = plan.nextShoot || {};
+    if (!shoot.date) continue;
+    events.push(icsEvent({
+      uid: "shoot-" + name + "-" + shoot.date + "@noiraunoir.com",
+      date: shoot.date, time: shoot.time || "", minutes: 180,
+      summary: "Shoot: " + (plan.name || name),
+      location: shoot.location || "",
+      description: [shoot.focus, "https://noiraunoir.com/" + name + "/admin.html"].filter(Boolean).join("\n")
+    }));
+  }
+
+  const body = [
+    "BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Noir au Noir//Studio calendar//EN", "CALSCALE:GREGORIAN", "METHOD:PUBLISH",
+    "X-WR-CALNAME:Noir au Noir", "X-WR-TIMEZONE:" + FEED_TZ,
+    "REFRESH-INTERVAL;VALUE=DURATION:PT15M", "X-PUBLISHED-TTL:PT15M",
+    "BEGIN:VTIMEZONE", "TZID:" + FEED_TZ,
+    "BEGIN:DAYLIGHT", "TZOFFSETFROM:+0100", "TZOFFSETTO:+0200", "TZNAME:CEST", "DTSTART:19700329T020000",
+    "RRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU", "END:DAYLIGHT",
+    "BEGIN:STANDARD", "TZOFFSETFROM:+0200", "TZOFFSETTO:+0100", "TZNAME:CET", "DTSTART:19701025T030000",
+    "RRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU", "END:STANDARD",
+    "END:VTIMEZONE",
+    ...events,
+    "END:VCALENDAR", ""
+  ].join("\r\n");
+
+  const res = new Response(body, {
+    headers: {
+      "Content-Type": "text/calendar; charset=utf-8",
+      "Cache-Control": "public, max-age=" + FEED_TTL,
+      "Content-Disposition": 'inline; filename="noir-au-noir.ics"'
+    }
+  });
+  edgeKeep(request, res.clone(), ctx);
+  return res;
+}
+
 export default {
   /* Runs on the cron in wrangler.toml, not on a request. */
   async scheduled(event, env, ctx) {
@@ -366,6 +524,8 @@ export default {
       if (url.pathname === "/codes") return listCodes(request, url, env, cors);
       if (url.pathname === "/people") return listPeople(request, url, env, cors);
       if (url.pathname === "/key") return keyInfo(request, env, cors);
+      if (url.pathname === "/calendar.ics") return serveCalendar(url, env, request, ctx);
+      if (url.pathname === "/calendar/link") return calendarLink(request, env, cors, false);
       if (url.pathname === "/usage") return usageFor(request, env, cors);
       if (url.pathname === "/refs") return listPartners(request, url, env, cors);
       if (url.pathname === "/call/list") return listCalls(request, url, env, cors);
@@ -388,6 +548,10 @@ export default {
 
     if (new URL(request.url).pathname === "/shoot-confirmed") {
       return sendShootInvite(request, env, cors);
+    }
+
+    if (new URL(request.url).pathname === "/calendar/link/new") {
+      return calendarLink(request, env, cors, true);
     }
 
     if (new URL(request.url).pathname === "/deliver") {
