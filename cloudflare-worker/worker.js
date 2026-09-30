@@ -141,6 +141,130 @@ export class PlatformMail extends WorkerEntrypoint {
   }
 }
 
+/* ============ THE PLATFORM'S PASS ============ */
+/* The platform (noir-platform) signs its owner in by email instead of
+   a GitHub key. When its admin needs this relay (uploads, ready mails,
+   shoot invites), it carries a short lived pass instead of a key:
+   "np1." + the payload + an HMAC over both, made with a secret only the
+   two workers hold (PLATFORM_TICKET_SECRET). A pass is worth exactly
+   what the GitHub key was worth here, so only the owner gets one. */
+const TICKET_PREFIX = "np1.";
+
+function b64urlBytes(text) {
+  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((text.length + 3) % 4);
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+async function verifyTicket(env, ticket) {
+  if (!env.PLATFORM_TICKET_SECRET) return false;
+  const parts = ticket.split(".");
+  if (parts.length !== 3) return false;
+  try {
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.PLATFORM_TICKET_SECRET),
+      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
+    const good = await crypto.subtle.verify("HMAC", key, b64urlBytes(parts[2]),
+      new TextEncoder().encode(parts[0] + "." + parts[1]));
+    if (!good) return false;
+    const payload = JSON.parse(new TextDecoder().decode(b64urlBytes(parts[1])));
+    return payload.r === "owner" && typeof payload.e === "number" && payload.e > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+/* ============ THE PLATFORM'S DOOR TO THE REPOS ============ */
+/* While Noir au Noir moves onto the platform, its plans are kept in the
+   database there and also written back to data/<client>.json here, so
+   everything that still reads the files (the morning brief, reminders,
+   ready mails, the old admin) goes on working. The platform has no
+   GitHub key of its own; it asks this worker, over the same kind of
+   private binding as its mail. Each method does one narrow thing. */
+const PLAN_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
+
+export class PlatformRepo extends WorkerEntrypoint {
+  gh(path, init = {}) {
+    return fetch("https://api.github.com" + path, {
+      ...init,
+      headers: {
+        "Authorization": "Bearer " + this.env.GITHUB_TOKEN,
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "mc-kresha-idea-box",
+        ...(init.body ? { "Content-Type": "application/json" } : {})
+      }
+    });
+  }
+
+  /* Write one client's plan file, the same way the old admin saved it. */
+  async putPlan(slug, text) {
+    slug = String(slug || "");
+    if (!PLAN_SLUG_RE.test(slug)) return { ok: false, error: "bad client" };
+    try { JSON.parse(text); } catch { return { ok: false, error: "not JSON" }; }
+    const path = `/repos/${CLIENTS_REPO}/contents/data/${slug}.json`;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const cur = await this.gh(path);
+      const sha = cur.ok ? (await cur.json()).sha : undefined;
+      if (!cur.ok && cur.status !== 404) return { ok: false, error: "GitHub " + cur.status };
+      const put = await this.gh(path, {
+        method: "PUT",
+        body: JSON.stringify({
+          message: "Update plan via the platform",
+          content: btoa(unescape(encodeURIComponent(text))),
+          ...(sha ? { sha } : {})
+        })
+      });
+      if (put.ok) return { ok: true };
+      // somebody saved in between: read the new version and write again
+      if (put.status !== 409 && put.status !== 422) return { ok: false, error: "GitHub " + put.status };
+    }
+    return { ok: false, error: "the file kept changing" };
+  }
+
+  /* One plan file as it is in the repo right now, not as the site's
+     ten minute cache has it. */
+  async getPlan(slug) {
+    slug = String(slug || "");
+    if (!PLAN_SLUG_RE.test(slug)) return { status: 400, text: null };
+    const res = await this.gh(`/repos/${CLIENTS_REPO}/contents/data/${slug}.json`);
+    if (!res.ok) return { status: res.status, text: null };
+    const file = await res.json();
+    return { status: 200, text: decodeURIComponent(escape(atob(String(file.content).replace(/\n/g, "")))) };
+  }
+
+  /* Every client with a plan file. */
+  async listPlans() {
+    const res = await this.gh(`/repos/${CLIENTS_REPO}/contents/data`);
+    if (!res.ok) return { status: res.status, slugs: null };
+    return {
+      status: 200,
+      slugs: (await res.json()).filter((f) => f.type === "file" && /^[a-z0-9][a-z0-9-]*\.json$/.test(f.name)).map((f) => f.name.slice(0, -5))
+    };
+  }
+
+  /* A client's idea box and shoot picks are issues in the clients repo. */
+  async listIssues(labels, state) {
+    const q = `?labels=${encodeURIComponent(String(labels || "").slice(0, 120))}` +
+      `&state=${state === "closed" ? "closed" : state === "all" ? "all" : "open"}&sort=created&direction=desc&per_page=100`;
+    const res = await this.gh(`/repos/${CLIENTS_REPO}/issues${q}`);
+    return { status: res.status, body: res.ok ? await res.json() : null };
+  }
+
+  async setIssueState(number, state) {
+    number = Number(number);
+    if (!Number.isInteger(number) || number < 1 || !["open", "closed"].includes(state)) return { status: 400 };
+    const res = await this.gh(`/repos/${CLIENTS_REPO}/issues/${number}`, { method: "PATCH", body: JSON.stringify({ state }) });
+    return { status: res.status };
+  }
+
+  /* Client names and addresses, from the private repo, when this
+     worker's key can reach it. */
+  async contacts() {
+    const res = await this.gh(`/repos/vollerodaniele-rgb/studio-private/contents/contacts.json`);
+    if (!res.ok) return { status: res.status, contacts: null };
+    const file = await res.json();
+    return { status: 200, contacts: JSON.parse(decodeURIComponent(escape(atob(String(file.content).replace(/\n/g, ""))))) };
+  }
+}
+
 export default {
   /* Runs on the cron in wrangler.toml, not on a request. */
   async scheduled(event, env, ctx) {
@@ -3555,6 +3679,8 @@ const CLIENTS_REPO = "vollerodaniele-rgb/clients";
    caller supplies goes through here first. */
 async function mayWrite(env, key) {
   if (!key) return false;
+  // a pass from the platform, for the admin signed in there by email
+  if (key.startsWith(TICKET_PREFIX)) return verifyTicket(env, key);
   try {
     const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
       headers: {
