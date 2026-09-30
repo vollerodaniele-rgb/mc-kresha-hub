@@ -255,6 +255,22 @@ export class PlatformRepo extends WorkerEntrypoint {
     return { status: res.status };
   }
 
+  /* The admin dashboard, opened on the platform, makes the same GitHub
+     calls it makes on noiraunoir.com, and they come here instead of
+     carrying a key from the browser. Only the two repos the dashboard
+     works in, only the parts of them it uses. */
+  async github(method, path, body) {
+    method = String(method || "GET").toUpperCase();
+    path = String(path || "");
+    const [route, query] = path.split("?");
+    const allowed = /^\/repos\/vollerodaniele-rgb\/(clients|studio-private)(\/(contents|git|issues)(\/[A-Za-z0-9._%\/-]*)?)?$/;
+    if (!allowed.test(route) || route.includes("..")) return { status: 403, body: JSON.stringify({ message: "not a path the admin uses" }) };
+    if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return { status: 405, body: "{}" };
+    if (query && !/^[A-Za-z0-9_.,:%=&+-]*$/.test(query)) return { status: 400, body: JSON.stringify({ message: "bad query" }) };
+    const res = await this.gh(route + (query ? "?" + query : ""), body && method !== "GET" ? { method, body: String(body) } : { method });
+    return { status: res.status, body: await res.text() };
+  }
+
   /* Client names and addresses, from the private repo, when this
      worker's key can reach it. */
   async contacts() {
