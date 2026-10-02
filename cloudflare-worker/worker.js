@@ -499,8 +499,8 @@ export default {
     /* A flood is what turns a free bucket into a bill, so every address
        gets a budget by the minute. Reads are generous, because one
        portal page asks for a month of thumbnails at once and a family
-       behind one office address should never notice this. Writes are
-       not, because a write is always one person pressing one button.
+       behind one office address should never notice this. Writes get
+       less: a person pressing a button, or one gallery being uploaded.
 
        Guarded, so the worker still runs if it is deployed without the
        limiters bound. */
@@ -574,6 +574,10 @@ export default {
 
     if (new URL(request.url).pathname === "/calendar/link/new") {
       return calendarLink(request, env, cors, true);
+    }
+
+    if (new URL(request.url).pathname === "/event/join") {
+      return joinEvent(request, env, ctx, cors);
     }
 
     if (new URL(request.url).pathname === "/deliver") {
@@ -1965,6 +1969,10 @@ async function rememberPerson(env, record, source, at) {
     known.phone = String(record.phone || known.phone || "").slice(0, 30);
     known.email = String(record.email || known.email || "").slice(0, 120);
     if (record.ref) known.ref = record.ref;
+    if (record.event) {
+      known.events = Array.isArray(known.events) ? known.events : [];
+      if (!known.events.includes(record.event)) known.events.push(record.event);
+    }
     if (!known.sources.includes(source)) known.sources.push(source);
     known.count = (known.count || 0) + 1;
     if (when < known.first) known.first = when;
@@ -1974,6 +1982,28 @@ async function rememberPerson(env, record, source, at) {
   } catch (err) {
     console.log("could not remember a person:", String(err));
   }
+}
+
+/* An event gallery asks a guest for a name and an email before it shows
+   the photos, so the studio knows who was there and can reach them. That
+   is all this does: it files the guest under Contacts, marked with the
+   event. No key, since guests have none; the hidden field catches bots,
+   and the per address write budget catches a flood. The gate itself is
+   on the page: the photos are no more locked than any other delivery. */
+async function joinEvent(request, env, ctx, cors) {
+  let data;
+  try { data = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+  if (data.website) return json({ ok: true }, 201, cors);
+
+  const client = String(data.client || "").toLowerCase();
+  const name = String(data.name || "").replace(/\s+/g, " ").trim().slice(0, 80);
+  const email = String(data.email || "").trim().toLowerCase().slice(0, 120);
+  if (!CLIENT_RE.test(client)) return json({ error: "unknown event" }, 400, cors);
+  if (name.length < 2) return json({ error: "Your name, so we know who you are." }, 400, cors);
+  if (!/^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/.test(email)) return json({ error: "That email doesn't look complete." }, 400, cors);
+
+  ctx.waitUntil(rememberPerson(env, { name, email, event: client }, "event"));
+  return json({ ok: true }, 201, cors);
 }
 
 /* The first read files everybody already in the bookings and call-backs,

@@ -23,8 +23,8 @@ bucket_name = "noir-deliveries"
 # A budget per address, by the minute, so a flood cannot run the bill up
 # on reads or fill the bucket with writes. Reads are generous: one
 # portal page asks for a month of thumbnails at once, and an office
-# behind a single address should never feel this. A write is always one
-# person pressing one button, so it needs far less room.
+# behind a single address should never feel this. Writes need less room:
+# a person pressing a button, or one gallery being uploaded.
 [[ratelimits]]
 name = "READ_RATE"
 namespace_id = "1001"
@@ -37,6 +37,8 @@ namespace_id = "1001"
 name = "WRITE_RATE"
 namespace_id = "1002"
 
+  # 120, not 30: an event gallery is hundreds of photos, each sent as
+  # three files, and at 30 a minute that took most of an hour
   [ratelimits.simple]
-  limit = 30
+  limit = 120
   period = 60
