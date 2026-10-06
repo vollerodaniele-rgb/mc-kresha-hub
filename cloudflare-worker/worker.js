@@ -3493,7 +3493,7 @@ async function sendShootInvite(request, env, cors) {
   }
 
   const ok = await mailShootInvite(env, {
-    to, who, client, plan, date,
+    to, who, client, date,
     time: String(data.time || ""),
     location: String(data.location || ""),
     focus: String(data.focus || "")
@@ -3502,7 +3502,7 @@ async function sendShootInvite(request, env, cors) {
   return ok ? json({ ok: true }, 200, cors) : json({ error: "the mail service refused it" }, 502, cors);
 }
 
-async function mailShootInvite(env, { to, who, client, plan, date, time, location, focus }) {
+async function mailShootInvite(env, { to, who, client, date, time, location, focus }) {
   const first = who.split(/\s+/)[0];
   const pretty = prettyDate(date);
   const subject = "Confirmed: " + pretty + (time ? " at " + time : "");
