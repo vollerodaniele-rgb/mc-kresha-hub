@@ -145,6 +145,66 @@ export class PlatformMail extends WorkerEntrypoint {
       return false;
     }
   }
+
+  /* A mail a photographer on the platform sends to their own client:
+     the delivery is ready, the shoot is confirmed, here is your page.
+     The platform writes the words; this dresses them in the glass mail
+     with that studio's name on it, and replies go to the photographer.
+     It leaves from this studio's address, which is the one the mail
+     service has verified, so the sender reads "<their studio> via Noir
+     au Noir". Any button can only lead back into the platform. */
+  async studio({ to, studio, replyTo, subject, heading, line, pane, button, closing, shoot }) {
+    const env = this.env;
+    const mail = /^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/;
+    to = String(to || "").trim().toLowerCase();
+    studio = String(studio || "").replace(/[\s"<>]+/g, " ").trim().slice(0, 60);
+    replyTo = String(replyTo || "").trim().toLowerCase();
+    subject = String(subject || "").replace(/\s+/g, " ").trim().slice(0, 140);
+    if (!mail.test(to) || !studio || !subject) return false;
+    if (!mail.test(replyTo)) replyTo = REPLY_TO;
+    if (button && !String(button.url || "").startsWith(PLATFORM_ORIGIN + "/")) return false;
+    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
+      console.log("studio mail skipped: RESEND_API_KEY or MAIL_FROM missing");
+      return false;
+    }
+
+    const address = (String(env.MAIL_FROM).match(/<([^>]+)>/) || [, String(env.MAIL_FROM)])[1].trim();
+    const html = glassShell([
+      glassKicker(studio),
+      glassHeading(String(heading || subject).slice(0, 80)),
+      glassText(esc(String(line || "").slice(0, 600))),
+      pane ? glassPane(paneLabel(String(pane.label || "")) + paneBig(String(pane.big || "")) +
+        paneSmall(esc(String(pane.sub || "")), 24, GLASS.quiet)) : "",
+      button ? glassButton(String(button.text || "Open"), button.url) + glassUrl(button.url) : "",
+      closing ? glassText(esc(String(closing).slice(0, 300)), 30) : "",
+      glassSignature(studio, replyTo)
+    ].filter(Boolean));
+    const text = [subject, "", line, "", button ? button.url : "", "", closing, "", studio, replyTo]
+      .filter((x) => x !== undefined && x !== null).join("\n");
+
+    const message = { from: '"' + studio + ' via Noir au Noir" <' + address + ">", to: [to], reply_to: replyTo, subject, html, text };
+    if (shoot && /^\d{4}-\d{2}-\d{2}$/.test(String(shoot.date || ""))) {
+      const ics = buildIcs({
+        slug: String(shoot.slug || "shoot").replace(/[^a-z0-9-]/gi, "").slice(0, 60),
+        date: shoot.date, time: String(shoot.time || ""), location: String(shoot.location || "").slice(0, 160),
+        focus: String(shoot.focus || "").slice(0, 300), stamp: Date.now(), summary: "Shoot with " + studio
+      });
+      message.attachments = [{ filename: "shoot.ics", content: btoa(unescape(encodeURIComponent(ics))) }];
+    }
+
+    try {
+      const res = await fetch(RESEND_ENDPOINT, {
+        method: "POST",
+        headers: { "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(), "Content-Type": "application/json" },
+        body: JSON.stringify(message)
+      });
+      if (!res.ok) console.log("studio mail failed:", res.status, await res.text());
+      return res.ok;
+    } catch (err) {
+      console.log("studio mail error:", String(err));
+      return false;
+    }
+  }
 }
 
 /* ============ THE PLATFORM'S PASS ============ */
@@ -1445,8 +1505,9 @@ ${rows.join("\n")}
 </body></html>`;
 }
 
-const glassKicker = () =>
-  `<tr><td class="pad" style="padding:30px 36px 0 36px;${gf()}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">Noir au Noir</td></tr>`;
+// `name` is another studio's, for a mail a photographer on the platform sends
+const glassKicker = (name) =>
+  `<tr><td class="pad" style="padding:30px 36px 0 36px;${gf()}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">${name ? esc(name) : "Noir au Noir"}</td></tr>`;
 
 const glassHeading = (text) =>
   `<tr><td class="pad" style="padding:26px 36px 0 36px;${gf()}font-size:34px;line-height:1.1;font-weight:500;letter-spacing:-0.6px;color:${GLASS.ink};">${esc(text)}</td></tr>`;
@@ -1506,11 +1567,11 @@ function glassList(items, numbered) {
 }
 
 /* The studio's own signature, or a plain line of small print. */
-const glassSignature = () =>
+const glassSignature = (name, address) =>
   `<tr><td class="pad" style="padding:34px 36px 36px 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
-      <tr><td style="padding:20px 0 0 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.ink};">Noir au Noir</td></tr>
-      <tr><td style="padding:4px 0 0 0;${gf()}font-size:12px;line-height:1.7;color:${GLASS.faint};">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:${GLASS.quiet};text-decoration:underline;">${REPLY_TO}</a></td></tr>
+      <tr><td style="padding:20px 0 0 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.ink};">${name ? esc(name) : "Noir au Noir"}</td></tr>
+      <tr><td style="padding:4px 0 0 0;${gf()}font-size:12px;line-height:1.7;color:${GLASS.faint};">${name ? "" : STUDIO_LINE + "<br>"}<a href="mailto:${esc(address || REPLY_TO)}" style="color:${GLASS.quiet};text-decoration:underline;">${esc(address || REPLY_TO)}</a></td></tr>
     </table>
   </td></tr>`;
 
@@ -3643,7 +3704,7 @@ function icsEscape(s) {
     .replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
 }
 
-function buildIcs({ slug, date, time, location, focus, stamp }) {
+function buildIcs({ slug, date, time, location, focus, stamp, summary }) {
   const start = zonedToUtc(date, time, SHOOT_TZ);
   const end = start + SHOOT_HOURS * 3600000;
 
@@ -3657,7 +3718,7 @@ function buildIcs({ slug, date, time, location, focus, stamp }) {
     "DTSTAMP:" + icsStamp(stamp),
     "DTSTART:" + icsStamp(start),
     "DTEND:" + icsStamp(end),
-    icsFold("SUMMARY:" + icsEscape("Shoot with Noir au Noir")),
+    icsFold("SUMMARY:" + icsEscape(summary || "Shoot with Noir au Noir")),
     location ? icsFold("LOCATION:" + icsEscape(location)) : "",
     focus ? icsFold("DESCRIPTION:" + icsEscape(focus)) : "",
     "END:VEVENT",
