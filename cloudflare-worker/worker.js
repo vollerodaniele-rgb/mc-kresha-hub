@@ -5,23 +5,17 @@
    static sites cannot: idea boxes and client requests (as GitHub
    issues), bookings and call links, deliveries and transfers in
    R2, mail, Telegram, partner boards, offer codes, contacts, the
-   morning checks and brief, the usage meter, the calendar feed,
-   and the private doors the platform (noir-platform) uses.
+   morning checks and brief, the usage meter and the calendar feed.
 
    Secrets (set in the Worker's settings, never in code):
      GITHUB_TOKEN            fine-grained token: issues and contents
-                             on the repos in SITES. The platform's
-                             Money and Contacts also need it to reach
-                             studio-private (read and write).
+                             on the repos in SITES
      TELEGRAM_BOT_TOKEN      the bot that pings him
      TELEGRAM_CHAT_ID        his chat with it
      RESEND_API_KEY          mail
      MAIL_FROM, MAIL_TO      who mail comes from, where his copies go
      CF_ANALYTICS_TOKEN      read only, for the usage meter
-     PLATFORM_TICKET_SECRET  shared with noir-platform, signs its passes
    ------------------------------------------------------------ */
-
-import { WorkerEntrypoint } from "cloudflare:workers";
 
 const SITES = {
   kresha: {
@@ -90,262 +84,6 @@ const ALLOWED_ORIGINS = [
   "https://proposal.noiraunoir.com",
   "http://localhost:4176"
 ];
-
-/* ============ THE PLATFORM'S MAIL ============ */
-/* The platform (noir-platform, a separate worker) signs people in with
-   a link by email. Rather than holding a second Resend key, it asks
-   this worker to send, through a service binding: a private door with
-   no address on the web, so only a worker bound to it can use it. It
-   still only sends one kind of mail, and only with a link back to the
-   platform itself, so even a mistake there cannot turn this into a way
-   to mail anything to anyone. */
-const PLATFORM_ORIGIN = "https://noir-platform.vollerodaniele.workers.dev";
-
-export class PlatformMail extends WorkerEntrypoint {
-  async signIn({ to, link, studio, invite }) {
-    const env = this.env;
-    to = String(to || "").trim().toLowerCase();
-    link = String(link || "");
-    studio = String(studio || "").replace(/\s+/g, " ").trim().slice(0, 60) || "your studio";
-    if (!/^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/.test(to)) return false;
-    if (!link.startsWith(PLATFORM_ORIGIN + "/auth/finish?t=")) return false;
-    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
-      console.log("platform mail skipped: RESEND_API_KEY or MAIL_FROM missing");
-      return false;
-    }
-
-    const subject = invite ? "Your studio on Noir au Noir: " + studio : "Your sign-in link";
-    const line = invite
-      ? "Noir au Noir has set up " + studio + " for you. Tap below to sign in and add your first clients. The link works once, for 7 days."
-      : "Tap below to sign in to " + studio + ". The link works once, for 20 minutes.";
-    const closing = invite
-      ? "No password to remember: whenever you want to sign in again, type your email and a new link arrives."
-      : "Didn't ask for this? Ignore it. Nobody can sign in without this mail.";
-
-    const html = glassShell([
-      glassKicker(),
-      glassHeading(invite ? "You're invited." : "Sign in."),
-      glassText(esc(line)),
-      glassButton(invite ? "Open your studio" : "Sign in", link),
-      glassText(esc(closing), 30),
-      glassSignature()
-    ]);
-    const text = [subject, "", line, "", link, "", closing, "", "Noir au Noir", REPLY_TO].join("\n");
-
-    try {
-      const res = await fetch(RESEND_ENDPOINT, {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(), "Content-Type": "application/json" },
-        body: JSON.stringify({ from: env.MAIL_FROM, to: [to], reply_to: REPLY_TO, subject, html, text })
-      });
-      if (!res.ok) console.log("platform mail failed:", res.status, await res.text());
-      return res.ok;
-    } catch (err) {
-      console.log("platform mail error:", String(err));
-      return false;
-    }
-  }
-
-  /* A mail a photographer on the platform sends to their own client:
-     the delivery is ready, the shoot is confirmed, here is your page.
-     The platform writes the words; this dresses them in the glass mail
-     with that studio's name on it, and replies go to the photographer.
-     It leaves from this studio's address, which is the one the mail
-     service has verified, so the sender reads "<their studio> via Noir
-     au Noir". Any button can only lead back into the platform. */
-  async studio({ to, studio, replyTo, subject, heading, line, pane, button, closing, shoot }) {
-    const env = this.env;
-    const mail = /^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$/;
-    to = String(to || "").trim().toLowerCase();
-    studio = String(studio || "").replace(/[\s"<>]+/g, " ").trim().slice(0, 60);
-    replyTo = String(replyTo || "").trim().toLowerCase();
-    subject = String(subject || "").replace(/\s+/g, " ").trim().slice(0, 140);
-    if (!mail.test(to) || !studio || !subject) return false;
-    if (!mail.test(replyTo)) replyTo = REPLY_TO;
-    if (button && !String(button.url || "").startsWith(PLATFORM_ORIGIN + "/")) return false;
-    if (!env.RESEND_API_KEY || !env.MAIL_FROM) {
-      console.log("studio mail skipped: RESEND_API_KEY or MAIL_FROM missing");
-      return false;
-    }
-
-    const address = (String(env.MAIL_FROM).match(/<([^>]+)>/) || [, String(env.MAIL_FROM)])[1].trim();
-    const html = glassShell([
-      glassKicker(studio),
-      glassHeading(String(heading || subject).slice(0, 80)),
-      glassText(esc(String(line || "").slice(0, 600))),
-      pane ? glassPane(paneLabel(String(pane.label || "")) + paneBig(String(pane.big || "")) +
-        paneSmall(esc(String(pane.sub || "")), 24, GLASS.quiet)) : "",
-      button ? glassButton(String(button.text || "Open"), button.url) + glassUrl(button.url) : "",
-      closing ? glassText(esc(String(closing).slice(0, 300)), 30) : "",
-      glassSignature(studio, replyTo)
-    ].filter(Boolean));
-    const text = [subject, "", line, "", button ? button.url : "", "", closing, "", studio, replyTo]
-      .filter((x) => x !== undefined && x !== null).join("\n");
-
-    const message = { from: '"' + studio + ' via Noir au Noir" <' + address + ">", to: [to], reply_to: replyTo, subject, html, text };
-    if (shoot && /^\d{4}-\d{2}-\d{2}$/.test(String(shoot.date || ""))) {
-      const ics = buildIcs({
-        slug: String(shoot.slug || "shoot").replace(/[^a-z0-9-]/gi, "").slice(0, 60),
-        date: shoot.date, time: String(shoot.time || ""), location: String(shoot.location || "").slice(0, 160),
-        focus: String(shoot.focus || "").slice(0, 300), stamp: Date.now(), summary: "Shoot with " + studio
-      });
-      message.attachments = [{ filename: "shoot.ics", content: btoa(unescape(encodeURIComponent(ics))) }];
-    }
-
-    try {
-      const res = await fetch(RESEND_ENDPOINT, {
-        method: "POST",
-        headers: { "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(), "Content-Type": "application/json" },
-        body: JSON.stringify(message)
-      });
-      if (!res.ok) console.log("studio mail failed:", res.status, await res.text());
-      return res.ok;
-    } catch (err) {
-      console.log("studio mail error:", String(err));
-      return false;
-    }
-  }
-}
-
-/* ============ THE PLATFORM'S PASS ============ */
-/* The platform (noir-platform) signs its owner in by email instead of
-   a GitHub key. When its admin needs this relay (uploads, ready mails,
-   shoot invites), it carries a short lived pass instead of a key:
-   "np1." + the payload + an HMAC over both, made with a secret only the
-   two workers hold (PLATFORM_TICKET_SECRET). A pass is worth exactly
-   what the GitHub key was worth here, so only the owner gets one. */
-const TICKET_PREFIX = "np1.";
-
-function b64urlBytes(text) {
-  const b64 = text.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((text.length + 3) % 4);
-  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-}
-
-async function verifyTicket(env, ticket) {
-  if (!env.PLATFORM_TICKET_SECRET) return false;
-  const parts = ticket.split(".");
-  if (parts.length !== 3) return false;
-  try {
-    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(env.PLATFORM_TICKET_SECRET),
-      { name: "HMAC", hash: "SHA-256" }, false, ["verify"]);
-    const good = await crypto.subtle.verify("HMAC", key, b64urlBytes(parts[2]),
-      new TextEncoder().encode(parts[0] + "." + parts[1]));
-    if (!good) return false;
-    const payload = JSON.parse(new TextDecoder().decode(b64urlBytes(parts[1])));
-    return payload.r === "owner" && typeof payload.e === "number" && payload.e > Date.now();
-  } catch {
-    return false;
-  }
-}
-
-/* ============ THE PLATFORM'S DOOR TO THE REPOS ============ */
-/* While Noir au Noir moves onto the platform, its plans are kept in the
-   database there and also written back to data/<client>.json here, so
-   everything that still reads the files (the morning brief, reminders,
-   ready mails, the old admin) goes on working. The platform has no
-   GitHub key of its own; it asks this worker, over the same kind of
-   private binding as its mail. Each method does one narrow thing. */
-const PLAN_SLUG_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
-
-export class PlatformRepo extends WorkerEntrypoint {
-  gh(path, init = {}) {
-    return fetch("https://api.github.com" + path, {
-      ...init,
-      headers: {
-        "Authorization": "Bearer " + this.env.GITHUB_TOKEN,
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "mc-kresha-idea-box",
-        ...(init.body ? { "Content-Type": "application/json" } : {})
-      }
-    });
-  }
-
-  /* Write one client's plan file, the same way the old admin saved it. */
-  async putPlan(slug, text) {
-    slug = String(slug || "");
-    if (!PLAN_SLUG_RE.test(slug)) return { ok: false, error: "bad client" };
-    try { JSON.parse(text); } catch { return { ok: false, error: "not JSON" }; }
-    const path = `/repos/${CLIENTS_REPO}/contents/data/${slug}.json`;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const cur = await this.gh(path);
-      const sha = cur.ok ? (await cur.json()).sha : undefined;
-      if (!cur.ok && cur.status !== 404) return { ok: false, error: "GitHub " + cur.status };
-      const put = await this.gh(path, {
-        method: "PUT",
-        body: JSON.stringify({
-          message: "Update plan via the platform",
-          content: btoa(unescape(encodeURIComponent(text))),
-          ...(sha ? { sha } : {})
-        })
-      });
-      if (put.ok) return { ok: true };
-      // somebody saved in between: read the new version and write again
-      if (put.status !== 409 && put.status !== 422) return { ok: false, error: "GitHub " + put.status };
-    }
-    return { ok: false, error: "the file kept changing" };
-  }
-
-  /* One plan file as it is in the repo right now, not as the site's
-     ten minute cache has it. */
-  async getPlan(slug) {
-    slug = String(slug || "");
-    if (!PLAN_SLUG_RE.test(slug)) return { status: 400, text: null };
-    const res = await this.gh(`/repos/${CLIENTS_REPO}/contents/data/${slug}.json`);
-    if (!res.ok) return { status: res.status, text: null };
-    const file = await res.json();
-    return { status: 200, text: decodeURIComponent(escape(atob(String(file.content).replace(/\n/g, "")))) };
-  }
-
-  /* Every client with a plan file. */
-  async listPlans() {
-    const res = await this.gh(`/repos/${CLIENTS_REPO}/contents/data`);
-    if (!res.ok) return { status: res.status, slugs: null };
-    return {
-      status: 200,
-      slugs: (await res.json()).filter((f) => f.type === "file" && /^[a-z0-9][a-z0-9-]*\.json$/.test(f.name)).map((f) => f.name.slice(0, -5))
-    };
-  }
-
-  /* A client's idea box and shoot picks are issues in the clients repo. */
-  async listIssues(labels, state) {
-    const q = `?labels=${encodeURIComponent(String(labels || "").slice(0, 120))}` +
-      `&state=${state === "closed" ? "closed" : state === "all" ? "all" : "open"}&sort=created&direction=desc&per_page=100`;
-    const res = await this.gh(`/repos/${CLIENTS_REPO}/issues${q}`);
-    return { status: res.status, body: res.ok ? await res.json() : null };
-  }
-
-  async setIssueState(number, state) {
-    number = Number(number);
-    if (!Number.isInteger(number) || number < 1 || !["open", "closed"].includes(state)) return { status: 400 };
-    const res = await this.gh(`/repos/${CLIENTS_REPO}/issues/${number}`, { method: "PATCH", body: JSON.stringify({ state }) });
-    return { status: res.status };
-  }
-
-  /* The admin dashboard, opened on the platform, makes the same GitHub
-     calls it makes on noiraunoir.com, and they come here instead of
-     carrying a key from the browser. Only the two repos the dashboard
-     works in, only the parts of them it uses. */
-  async github(method, path, body) {
-    method = String(method || "GET").toUpperCase();
-    path = String(path || "");
-    const [route, query] = path.split("?");
-    const allowed = /^\/repos\/vollerodaniele-rgb\/(clients|studio-private)(\/(contents|git|issues)(\/[A-Za-z0-9._%\/-]*)?)?$/;
-    if (!allowed.test(route) || route.includes("..")) return { status: 403, body: JSON.stringify({ message: "not a path the admin uses" }) };
-    if (!["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)) return { status: 405, body: "{}" };
-    if (query && !/^[A-Za-z0-9_.,:%=&+-]*$/.test(query)) return { status: 400, body: JSON.stringify({ message: "bad query" }) };
-    const res = await this.gh(route + (query ? "?" + query : ""), body && method !== "GET" ? { method, body: String(body) } : { method });
-    return { status: res.status, body: await res.text() };
-  }
-
-  /* Client names and addresses, from the private repo, when this
-     worker's key can reach it. */
-  async contacts() {
-    const res = await this.gh(`/repos/vollerodaniele-rgb/studio-private/contents/contacts.json`);
-    if (!res.ok) return { status: res.status, contacts: null };
-    const file = await res.json();
-    return { status: 200, contacts: JSON.parse(decodeURIComponent(escape(atob(String(file.content).replace(/\n/g, ""))))) };
-  }
-}
 
 /* ============ THE CALENDAR FEED ============ */
 /* Everything with a time on it, as a calendar his phone subscribes to:
@@ -1505,9 +1243,8 @@ ${rows.join("\n")}
 </body></html>`;
 }
 
-// `name` is another studio's, for a mail a photographer on the platform sends
-const glassKicker = (name) =>
-  `<tr><td class="pad" style="padding:30px 36px 0 36px;${gf()}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">${name ? esc(name) : "Noir au Noir"}</td></tr>`;
+const glassKicker = () =>
+  `<tr><td class="pad" style="padding:30px 36px 0 36px;${gf()}font-size:11px;font-weight:700;letter-spacing:4px;text-transform:uppercase;color:${GLASS.quiet};">Noir au Noir</td></tr>`;
 
 const glassHeading = (text) =>
   `<tr><td class="pad" style="padding:26px 36px 0 36px;${gf()}font-size:34px;line-height:1.1;font-weight:500;letter-spacing:-0.6px;color:${GLASS.ink};">${esc(text)}</td></tr>`;
@@ -1567,11 +1304,11 @@ function glassList(items, numbered) {
 }
 
 /* The studio's own signature, or a plain line of small print. */
-const glassSignature = (name, address) =>
+const glassSignature = () =>
   `<tr><td class="pad" style="padding:34px 36px 36px 36px;">
     <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;border-collapse:collapse;border-top:1px solid ${GLASS.rule};">
-      <tr><td style="padding:20px 0 0 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.ink};">${name ? esc(name) : "Noir au Noir"}</td></tr>
-      <tr><td style="padding:4px 0 0 0;${gf()}font-size:12px;line-height:1.7;color:${GLASS.faint};">${name ? "" : STUDIO_LINE + "<br>"}<a href="mailto:${esc(address || REPLY_TO)}" style="color:${GLASS.quiet};text-decoration:underline;">${esc(address || REPLY_TO)}</a></td></tr>
+      <tr><td style="padding:20px 0 0 0;${gf()}font-size:14px;font-weight:500;color:${GLASS.ink};">Noir au Noir</td></tr>
+      <tr><td style="padding:4px 0 0 0;${gf()}font-size:12px;line-height:1.7;color:${GLASS.faint};">${STUDIO_LINE}<br><a href="mailto:${REPLY_TO}" style="color:${GLASS.quiet};text-decoration:underline;">${REPLY_TO}</a></td></tr>
     </table>
   </td></tr>`;
 
@@ -3704,7 +3441,7 @@ function icsEscape(s) {
     .replace(/,/g, "\\,").replace(/\r?\n/g, "\\n");
 }
 
-function buildIcs({ slug, date, time, location, focus, stamp, summary }) {
+function buildIcs({ slug, date, time, location, focus, stamp }) {
   const start = zonedToUtc(date, time, SHOOT_TZ);
   const end = start + SHOOT_HOURS * 3600000;
 
@@ -3718,7 +3455,7 @@ function buildIcs({ slug, date, time, location, focus, stamp, summary }) {
     "DTSTAMP:" + icsStamp(stamp),
     "DTSTART:" + icsStamp(start),
     "DTEND:" + icsStamp(end),
-    icsFold("SUMMARY:" + icsEscape(summary || "Shoot with Noir au Noir")),
+    icsFold("SUMMARY:" + icsEscape("Shoot with Noir au Noir")),
     location ? icsFold("LOCATION:" + icsEscape(location)) : "",
     focus ? icsFold("DESCRIPTION:" + icsEscape(focus)) : "",
     "END:VEVENT",
@@ -3959,8 +3696,6 @@ const CLIENTS_REPO = "vollerodaniele-rgb/clients";
    caller supplies goes through here first. */
 async function mayWrite(env, key) {
   if (!key) return false;
-  // a pass from the platform, for the admin signed in there by email
-  if (key.startsWith(TICKET_PREFIX)) return verifyTicket(env, key);
   try {
     const res = await fetch(`https://api.github.com/repos/${CLIENTS_REPO}`, {
       headers: {
