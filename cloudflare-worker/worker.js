@@ -328,6 +328,7 @@ export default {
       // so browsers refuse to play it. We hand it back properly typed.
       if (url.pathname === "/audio") return serveAudio(url, env);
       if (url.pathname === "/telegram-setup") return telegramSetup(env, cors);
+      if (url.pathname === "/telegram-hook") return telegramHookSetup(request, env, cors);
       if (url.pathname === "/mail-setup") return mailSetup(env, cors);
       if (url.pathname === "/delivery") return listDelivery(url, env, cors);
       if (url.pathname === "/file") return serveDelivery(url, env, request, ctx);
@@ -354,6 +355,11 @@ export default {
 
     if (request.method !== "POST") {
       return json({ error: "POST or GET only" }, 405, cors);
+    }
+
+    // Telegram itself, delivering what he typed or tapped in the bot
+    if (new URL(request.url).pathname === "/telegram") {
+      return telegramUpdate(request, env);
     }
 
     // the one endpoint that sends mail to an address chosen by the
@@ -756,6 +762,315 @@ async function telegram(env, text, buttons) {
   } catch (err) {
     console.log("telegram error:", String(err));
     return false;
+  }
+}
+
+/* ============ FOLLOW-UPS FROM TELEGRAM ============ */
+/* After a call he sends the bot a name and an email. The bot asks the
+   language, then which mail, shows the finished mail, and only Send
+   actually mails the client. Every step keeps the name and the email as
+   the first two lines of the same message, so nothing has to be stored
+   between taps: the next tap reads them back from the message itself.
+
+   Only his own chat counts, and only requests carrying the secret that
+   setWebhook was given, so nobody else can make the studio mail anyone. */
+
+const FOLLOW_UPS = {
+  nl: {
+    hello: (first) => "Dag " + first + ",",
+    bye: "Met vriendelijke groeten,",
+    mails: {
+      reels: {
+        button: "One Take reels",
+        subject: "Ons One Take reel plan",
+        lines: ["Bedankt voor het fijne gesprek. Zoals beloofd stuur ik je hierbij ons One Take reel plan: reels gefilmd in één doorlopende take, rechtstreeks naar je feed, zonder zware productie eromheen."],
+        link: { text: "Bekijk het plan", url: "https://noiraunoir.com/reels/" },
+        closing: "Bekijk het gerust wanneer het je past. Heb je vragen of wil je iets aanpassen, antwoord dan gewoon op deze mail of boek een kort gesprek via de pagina."
+      },
+      proposal: {
+        button: "Full proposal",
+        subject: "Bedankt voor het gesprek",
+        lines: ["Bedankt voor het fijne gesprek. We nemen de tijd om alles wat je vertelde mee te nemen in een voorstel op maat. Je ontvangt het binnen enkele dagen."],
+        closing: "Heb je in tussentijd nog vragen, antwoord dan gewoon op deze mail."
+      },
+      general: {
+        button: "General follow-up",
+        subject: "Bedankt voor het gesprek",
+        lines: ["Bedankt voor het fijne gesprek, het was fijn om je beter te leren kennen."],
+        link: { text: "Plan een gesprek", url: "https://noiraunoir.com/call/" },
+        closing: "Heb je nog vragen of wil je verder praten, antwoord dan gewoon op deze mail of plan een moment via de pagina. We horen graag van je."
+      }
+    }
+  },
+  en: {
+    hello: (first) => "Hi " + first + ",",
+    bye: "Kind regards,",
+    mails: {
+      reels: {
+        button: "One Take reels",
+        subject: "Our One Take reel plan",
+        lines: ["Thank you for the good conversation. As promised, here is our One Take reel plan: reels filmed in one continuous take, straight to your feed, without heavy production around it."],
+        link: { text: "See the plan", url: "https://noiraunoir.com/reels/" },
+        closing: "Have a look whenever it suits you. If you have questions or want to adjust anything, just reply to this mail or book a short call through the page."
+      },
+      proposal: {
+        button: "Full proposal",
+        subject: "Thank you for the call",
+        lines: ["Thank you for the good conversation. We are taking the time to work everything you told us into a proposal made for you. You will receive it within a few days."],
+        closing: "If anything comes up in the meantime, just reply to this mail."
+      },
+      general: {
+        button: "General follow-up",
+        subject: "Thank you for the call",
+        lines: ["Thank you for the good conversation, it was great getting to know you better."],
+        link: { text: "Book a call", url: "https://noiraunoir.com/call/" },
+        closing: "If you have questions or would like to talk further, just reply to this mail or book a moment through the page. We look forward to hearing from you."
+      }
+    }
+  }
+};
+const FOLLOW_UP_SIGNER = "Daniele";
+const LANG_NAME = { nl: "Nederlands", en: "English" };
+
+/* Derived from the bot token, so there is no extra secret to keep: the
+   same token always gives the same value, and nobody without it can. */
+async function hookSecret(env) {
+  const bytes = await crypto.subtle.digest("SHA-256",
+    new TextEncoder().encode("follow-up hook " + env.TELEGRAM_BOT_TOKEN));
+  return [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 48);
+}
+
+/* Open once after a deploy (or after the bot token changes) and Telegram
+   starts sending what he types to /telegram. Harmless to open again. */
+async function telegramHookSetup(request, env, cors) {
+  if (!env.TELEGRAM_BOT_TOKEN) return json({ error: "no TELEGRAM_BOT_TOKEN on this worker" }, 503, cors);
+  const hook = new URL(request.url);
+  hook.pathname = "/telegram";
+  hook.search = "";
+  const done = await tg(env, "setWebhook", {
+    url: hook.toString(),
+    secret_token: await hookSecret(env),
+    allowed_updates: ["message", "callback_query"]
+  });
+  return done
+    ? json({ done: "The bot now listens. Send it a name and an email." }, 200, cors)
+    : json({ error: "Telegram refused setWebhook, see the worker log." }, 502, cors);
+}
+
+/* Any Telegram method, returning its result or null. */
+async function tg(env, method, body) {
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      console.log("telegram " + method + " failed:", res.status, await res.text());
+      return null;
+    }
+    return (await res.json()).result;
+  } catch (err) {
+    console.log("telegram " + method + " error:", String(err));
+    return null;
+  }
+}
+
+async function telegramUpdate(request, env) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return new Response("off");
+  if (request.headers.get("X-Telegram-Bot-Api-Secret-Token") !== await hookSecret(env)) {
+    return new Response("no", { status: 403 });
+  }
+  let update;
+  try {
+    update = await request.json();
+  } catch {
+    return new Response("ok");
+  }
+  // always 200 once it is really Telegram, or it keeps retrying the same
+  // update and a failure would turn into a loop of messages
+  try {
+    if (update.message) await followUpStart(env, update.message);
+    else if (update.callback_query) await followUpTap(env, update.callback_query);
+  } catch (err) {
+    console.log("follow-up failed:", String(err));
+  }
+  return new Response("ok");
+}
+
+const isMine = (env, chat) => chat && String(chat.id) === String(env.TELEGRAM_CHAT_ID).trim();
+
+const EMAIL_RE = /[^\s<>(),;:"']+@[^\s<>(),;:"']+\.[a-z]{2,}/i;
+
+/* "Tuur tuur@stook.be", in any order, with or without commas. */
+function parseWho(text) {
+  const email = (String(text || "").match(EMAIL_RE) || [])[0];
+  if (!email) return null;
+  const name = String(text).replace(email, " ").replace(/[,;:<>()"]/g, " ").replace(/\s+/g, " ").trim();
+  if (!name) return null;
+  const first = name.split(" ")[0];
+  return { name, first: first.charAt(0).toUpperCase() + first.slice(1), email };
+}
+
+/* The first two lines of every bot message in this flow. */
+const whoHead = (who) => "<b>Follow-up for " + esc(who.name) + "</b>\n" + esc(who.email);
+
+/* Read back from the message the tap came from. */
+function whoFromMessage(message) {
+  const lines = String((message && message.text) || "").split("\n");
+  const name = (lines[0] || "").replace(/^(Follow-up for|Sent to) /, "");
+  return parseWho(name + " " + (lines[1] || ""));
+}
+
+const langButtons = () => ({
+  inline_keyboard: [[
+    { text: "Nederlands", callback_data: "fl:nl" },
+    { text: "English", callback_data: "fl:en" }
+  ]]
+});
+
+const mailButtons = (lang) => ({
+  inline_keyboard: [
+    ...Object.entries(FOLLOW_UPS[lang].mails).map(([kind, m]) => [{ text: m.button, callback_data: "fu:" + lang + ":" + kind }]),
+    [{ text: "Back", callback_data: "fb" }]
+  ]
+});
+
+async function followUpStart(env, message) {
+  if (!isMine(env, message.chat)) return;
+  const who = parseWho(message.text);
+  if (!who) {
+    await tg(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "Send me a name and an email after a call, like:\nTuur tuur@stook.be"
+    });
+    return;
+  }
+  await tg(env, "sendMessage", {
+    chat_id: message.chat.id,
+    parse_mode: "HTML",
+    text: whoHead(who) + "\n\nWhich language do they speak?",
+    reply_markup: langButtons()
+  });
+}
+
+async function followUpTap(env, q) {
+  const message = q.message;
+  const answer = (text) => tg(env, "answerCallbackQuery", { callback_query_id: q.id, text: text || "" });
+  if (!message || !isMine(env, message.chat)) return answer();
+
+  const who = whoFromMessage(message);
+  if (!who) return answer("I lost the name and email, send them again.");
+
+  const edit = (text, markup) => tg(env, "editMessageText", {
+    chat_id: message.chat.id,
+    message_id: message.message_id,
+    parse_mode: "HTML",
+    disable_web_page_preview: true,
+    text: whoHead(who) + "\n\n" + text,
+    reply_markup: markup || { inline_keyboard: [] }
+  });
+
+  const [step, lang, kind] = String(q.data || "").split(":");
+  const mail = FOLLOW_UPS[lang] && FOLLOW_UPS[lang].mails[kind];
+
+  if (step === "fb") {
+    await edit("Which language do they speak?", langButtons());
+    return answer();
+  }
+  if (step === "fl" && FOLLOW_UPS[lang]) {
+    await edit(LANG_NAME[lang] + ". Which mail?", mailButtons(lang));
+    return answer();
+  }
+  if (step === "fu" && mail) {
+    await edit("<b>" + esc(mail.subject) + "</b>\n\n" + esc(followUpText(lang, mail, who)), {
+      inline_keyboard: [[
+        { text: "Send", callback_data: "fs:" + lang + ":" + kind },
+        { text: "Back", callback_data: "fl:" + lang }
+      ]]
+    });
+    return answer();
+  }
+  if (step === "fs" && mail) {
+    // a double tap must not mail the client twice
+    const mark = "followup/sent/" + message.chat.id + "-" + message.message_id;
+    if (env.DELIVERIES) {
+      if (await env.DELIVERIES.head(mark)) return answer("Already sent.");
+      await env.DELIVERIES.put(mark, new Date().toISOString());
+    }
+    const problem = await sendFollowUp(env, lang, mail, who);
+    if (problem) {
+      if (env.DELIVERIES) await env.DELIVERIES.delete(mark);
+      await answer("Not sent: " + problem);
+      return;
+    }
+    await tg(env, "editMessageText", {
+      chat_id: message.chat.id,
+      message_id: message.message_id,
+      parse_mode: "HTML",
+      text: "<b>Sent to " + esc(who.name) + "</b>\n" + esc(who.email) + "\n\n" +
+        esc(mail.button + ", " + LANG_NAME[lang] + ". A copy is in your inbox.")
+    });
+    return answer("Sent.");
+  }
+  return answer();
+}
+
+function followUpText(lang, mail, who) {
+  const words = FOLLOW_UPS[lang];
+  return [
+    words.hello(who.first),
+    "",
+    ...mail.lines.flatMap((l) => [l, ""]),
+    ...(mail.link ? [mail.link.url, ""] : []),
+    mail.closing,
+    "",
+    words.bye,
+    FOLLOW_UP_SIGNER,
+    "Noir au Noir"
+  ].join("\n");
+}
+
+/* Returns null when sent, otherwise what went wrong, for the tap. */
+async function sendFollowUp(env, lang, mail, who) {
+  if (!env.RESEND_API_KEY || !env.MAIL_FROM) return "mail is not set up on the worker";
+  const words = FOLLOW_UPS[lang];
+  const html = glassShell([
+    glassKicker(),
+    glassHeading(words.hello(who.first)),
+    ...mail.lines.map((l) => glassText(esc(l))),
+    ...(mail.link ? [glassButton(mail.link.text, mail.link.url), glassUrl(mail.link.url)] : []),
+    glassText(esc(mail.closing), 30),
+    glassText(esc(words.bye) + "<br>" + esc(FOLLOW_UP_SIGNER), 24),
+    glassSignature()
+  ]);
+  const text = followUpText(lang, mail, who) + "\n" + REPLY_TO;
+  try {
+    const res = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Authorization": "Bearer " + String(env.RESEND_API_KEY).trim(),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: env.MAIL_FROM,
+        to: [who.email],
+        // his copy, since this mail never passes through his own outbox
+        ...(env.MAIL_TO ? { bcc: [env.MAIL_TO] } : {}),
+        reply_to: REPLY_TO,
+        subject: mail.subject,
+        html,
+        text
+      })
+    });
+    if (!res.ok) {
+      console.log("follow-up mail failed:", res.status, await res.text());
+      return "the mail service said " + res.status;
+    }
+    return null;
+  } catch (err) {
+    console.log("follow-up mail error:", String(err));
+    return "the mail service could not be reached";
   }
 }
 
