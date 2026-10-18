@@ -786,20 +786,26 @@ const FOLLOW_UPS = {
         lines: ["Bedankt voor het fijne gesprek. Zoals beloofd stuur ik je hierbij ons One Take reel plan: reels gefilmd in één doorlopende take, rechtstreeks naar je feed, zonder zware productie eromheen."],
         link: { text: "Bekijk het plan", url: "https://noiraunoir.com/reels/" }
       },
-      proposal: {
-        button: "Full proposal",
-        subject: "Bedankt voor het gesprek",
-        lines: ["Bedankt voor het fijne gesprek. We nemen de tijd om alles wat je vertelde mee te nemen in een voorstel op maat. Je ontvangt het binnen enkele dagen."],
-        closing: "Heb je in tussentijd nog vragen, antwoord dan gewoon op deze mail."
+      // the button only; the mail itself is made per proposal, see proposalMail
+      p: { button: "Your proposal" },
+      shoot: {
+        button: "Book the shoot",
+        subject: "Kies je filmdag",
+        lines: ["Fijn dat we gaan samenwerken. Kies op de pagina de dag waarop we komen filmen, dan zetten we alles vast."],
+        link: { text: "Kies je filmdag", url: "https://noiraunoir.com/reels/#lock" }
       },
-      general: {
-        button: "General follow-up",
-        subject: "Bedankt voor het gesprek",
-        lines: ["Bedankt voor het fijne gesprek, het was fijn om je beter te leren kennen."],
-        link: { text: "Plan een gesprek", url: "https://noiraunoir.com/call/" },
-        closing: "Heb je nog vragen of wil je verder praten, antwoord dan gewoon op deze mail of plan een moment via de pagina. We horen graag van je."
+      missed: {
+        button: "Missed call",
+        subject: "Een nieuw moment",
+        lines: ["We hebben elkaar helaas gemist. Kies hier een nieuw moment dat je past, dan bellen we je dan."],
+        link: { text: "Kies een nieuw moment", url: "https://noiraunoir.com/call/" }
       }
-    }
+    },
+    proposal: (brand) => ({
+      subject: "Ons voorstel voor " + brand,
+      lines: ["Bedankt voor het fijne gesprek. Zoals beloofd vind je hier ons voorstel voor " + brand + "."],
+      linkText: "Bekijk het voorstel"
+    })
   },
   en: {
     hello: (first) => "Hi " + first + ",",
@@ -811,20 +817,25 @@ const FOLLOW_UPS = {
         lines: ["Thank you for the good conversation. As promised, here is our One Take reel plan: reels filmed in one continuous take, straight to your feed, without heavy production around it."],
         link: { text: "See the plan", url: "https://noiraunoir.com/reels/" }
       },
-      proposal: {
-        button: "Full proposal",
-        subject: "Thank you for the call",
-        lines: ["Thank you for the good conversation. We are taking the time to work everything you told us into a proposal made for you. You will receive it within a few days."],
-        closing: "If anything comes up in the meantime, just reply to this mail."
+      p: { button: "Your proposal" },
+      shoot: {
+        button: "Book the shoot",
+        subject: "Pick your filming day",
+        lines: ["Great that we will be working together. Pick the day we come and film on the page, and we will lock everything in."],
+        link: { text: "Pick your filming day", url: "https://noiraunoir.com/reels/#lock" }
       },
-      general: {
-        button: "General follow-up",
-        subject: "Thank you for the call",
-        lines: ["Thank you for the good conversation, it was great getting to know you better."],
-        link: { text: "Book a call", url: "https://noiraunoir.com/call/" },
-        closing: "If you have questions or would like to talk further, just reply to this mail or book a moment through the page. We look forward to hearing from you."
+      missed: {
+        button: "Missed call",
+        subject: "A new moment",
+        lines: ["Unfortunately we missed each other. Pick a new moment that suits you here and we will call you then."],
+        link: { text: "Pick a new moment", url: "https://noiraunoir.com/call/" }
       }
-    }
+    },
+    proposal: (brand) => ({
+      subject: "Our proposal for " + brand,
+      lines: ["Thank you for the good conversation. As promised, here is our proposal for " + brand + "."],
+      linkText: "See the proposal"
+    })
   }
 };
 const FOLLOW_UP_SIGNER = "Daniele";
@@ -969,8 +980,10 @@ async function followUpTap(env, q) {
     reply_markup: markup || { inline_keyboard: [] }
   });
 
-  const [step, lang, kind] = String(q.data || "").split(":");
-  const mail = FOLLOW_UPS[lang] && FOLLOW_UPS[lang].mails[kind];
+  const [step, lang, kind, slug] = String(q.data || "").split(":");
+  const mail = await followUpMail(env, lang, kind, slug);
+  // what the Send button carries, the proposal included
+  const pick = lang + ":" + kind + (slug ? ":" + slug : "");
 
   if (step === "fb") {
     await edit("Which language do they speak?", langButtons());
@@ -980,11 +993,23 @@ async function followUpTap(env, q) {
     await edit(LANG_NAME[lang] + ". Which mail?", mailButtons(lang));
     return answer();
   }
+  // the proposal mail needs to know which proposal first
+  if (step === "fu" && kind === "p" && !slug && FOLLOW_UPS[lang]) {
+    const list = await openProposals(env);
+    if (!list.length) return answer("No open proposals in the dashboard. Make one first.");
+    await edit(LANG_NAME[lang] + ". Which proposal?", {
+      inline_keyboard: [
+        ...list.map((x) => [{ text: x.brand, callback_data: "fu:" + lang + ":p:" + x.slug }]),
+        [{ text: "Back", callback_data: "fl:" + lang }]
+      ]
+    });
+    return answer();
+  }
   if (step === "fu" && mail) {
     await edit("<b>" + esc(mail.subject) + "</b>\n\n" + esc(followUpText(lang, mail, who)), {
       inline_keyboard: [[
-        { text: "Send", callback_data: "fs:" + lang + ":" + kind },
-        { text: "Back", callback_data: "fl:" + lang }
+        { text: "Send", callback_data: "fs:" + pick },
+        { text: "Back", callback_data: slug ? "fu:" + lang + ":p" : "fl:" + lang }
       ]]
     });
     return answer();
@@ -1012,6 +1037,54 @@ async function followUpTap(env, q) {
     return answer("Sent.");
   }
   return answer();
+}
+
+/* The fixed mails, or the one made for a proposal from its own file. */
+async function followUpMail(env, lang, kind, slug) {
+  const words = FOLLOW_UPS[lang];
+  if (!words || !kind || !words.mails[kind]) return null;
+  if (kind !== "p") return words.mails[kind];
+  if (!slug || !/^[A-Za-z0-9_-]{6,40}$/.test(slug)) return null;
+  const proposal = await readProposal(env, BRIEF_REPO, slug);
+  if (!proposal) return null;
+  const made = words.proposal(String(proposal.client || "").trim() || "jullie");
+  return {
+    button: words.mails.p.button,
+    subject: made.subject,
+    lines: made.lines,
+    link: { text: made.linkText, url: "https://noiraunoir.com/p/" + slug + "/" }
+  };
+}
+
+/* The proposals in the dashboard, leaving out any already accepted. */
+async function openProposals(env) {
+  const headers = {
+    "Authorization": "Bearer " + env.GITHUB_TOKEN,
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "mc-kresha-idea-box"
+  };
+  try {
+    const [files, accepted] = await Promise.all([
+      fetch(`https://api.github.com/repos/${BRIEF_REPO}/contents/proposals`, { headers }),
+      fetch(`https://api.github.com/repos/${BRIEF_REPO}/issues?labels=accepted&state=open&per_page=100`, { headers })
+    ]);
+    if (!files.ok) return [];
+    const taken = new Set(accepted.ok
+      ? (await accepted.json()).flatMap((i) => (i.labels || []).map((l) => String(l.name || l)))
+      : []);
+    const slugs = (await files.json())
+      .filter((f) => f.type === "file" && f.name.endsWith(".json") && !f.name.startsWith("_"))
+      .map((f) => f.name.slice(0, -".json".length))
+      .filter((slug) => !taken.has("proposal:" + slug))
+      .slice(0, 12);
+    return await Promise.all(slugs.map(async (slug) => {
+      const d = await readProposal(env, BRIEF_REPO, slug);
+      return { slug, brand: String((d && d.client) || slug).slice(0, 40) };
+    }));
+  } catch (err) {
+    console.log("follow-up could not list proposals:", String(err));
+    return [];
+  }
 }
 
 function followUpText(lang, mail, who) {
