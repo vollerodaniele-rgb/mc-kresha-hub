@@ -784,8 +784,7 @@ const FOLLOW_UPS = {
         button: "One Take reels",
         subject: "Ons One Take reel plan",
         lines: ["Bedankt voor het fijne gesprek. Zoals beloofd stuur ik je hierbij ons One Take reel plan: reels gefilmd in één doorlopende take, rechtstreeks naar je feed, zonder zware productie eromheen."],
-        link: { text: "Bekijk het plan", url: "https://noiraunoir.com/reels/" },
-        closing: "Bekijk het gerust wanneer het je past. Heb je vragen of wil je iets aanpassen, antwoord dan gewoon op deze mail of boek een kort gesprek via de pagina."
+        link: { text: "Bekijk het plan", url: "https://noiraunoir.com/reels/" }
       },
       proposal: {
         button: "Full proposal",
@@ -810,8 +809,7 @@ const FOLLOW_UPS = {
         button: "One Take reels",
         subject: "Our One Take reel plan",
         lines: ["Thank you for the good conversation. As promised, here is our One Take reel plan: reels filmed in one continuous take, straight to your feed, without heavy production around it."],
-        link: { text: "See the plan", url: "https://noiraunoir.com/reels/" },
-        closing: "Have a look whenever it suits you. If you have questions or want to adjust anything, just reply to this mail or book a short call through the page."
+        link: { text: "See the plan", url: "https://noiraunoir.com/reels/" }
       },
       proposal: {
         button: "Full proposal",
@@ -1023,8 +1021,7 @@ function followUpText(lang, mail, who) {
     "",
     ...mail.lines.flatMap((l) => [l, ""]),
     ...(mail.link ? [mail.link.url, ""] : []),
-    mail.closing,
-    "",
+    ...(mail.closing ? [mail.closing, ""] : []),
     words.bye,
     FOLLOW_UP_SIGNER,
     "Noir au Noir"
@@ -1040,8 +1037,8 @@ async function sendFollowUp(env, lang, mail, who) {
     glassHeading(words.hello(who.first)),
     ...mail.lines.map((l) => glassText(esc(l))),
     ...(mail.link ? [glassButton(mail.link.text, mail.link.url), glassUrl(mail.link.url)] : []),
-    glassText(esc(mail.closing), 30),
-    glassText(esc(words.bye) + "<br>" + esc(FOLLOW_UP_SIGNER), 24),
+    ...(mail.closing ? [glassText(esc(mail.closing), 30)] : []),
+    glassText(esc(words.bye) + "<br>" + esc(FOLLOW_UP_SIGNER), mail.closing ? 24 : 30),
     glassSignature()
   ]);
   const text = followUpText(lang, mail, who) + "\n" + REPLY_TO;
