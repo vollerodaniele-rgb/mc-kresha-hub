@@ -1272,6 +1272,65 @@ const MONTH_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 // so, rather than failing halfway through a long upload
 const MAX_UPLOAD = 95 * 1024 * 1024;
 
+/* A film bigger than one request can carry goes up in parts, each under
+   the cap, and the bucket joins them into one file at the end. The page
+   cuts the file; this only passes each part on. Steps, all on the same
+   address as a normal upload, so the same key check runs first:
+     start  (size=)          opens it, answers { upload }
+     part   (upload=, part=) one piece, answers { part, etag }
+     done   (upload=)        body { parts: [{ part, etag }] }, joins them
+     abort  (upload=)        throws the pieces away
+   The ceiling on the whole file is there for the free storage, which a
+   few films of many gigabytes would fill on their own. */
+const MAX_WHOLE_FILE = 4 * 1024 * 1024 * 1024;
+
+async function inParts(step, request, url, env, cors, key, type) {
+  try {
+    if (step === "start") {
+      const total = Number(url.searchParams.get("size"));
+      if (!(total > 0)) return json({ error: "the upload did not say how big the file is" }, 411, cors);
+      if (total > MAX_WHOLE_FILE) return json({ error: "that file is over 4GB. Export it smaller." }, 413, cors);
+      const up = await env.DELIVERIES.createMultipartUpload(key, { httpMetadata: { contentType: type } });
+      return json({ upload: up.uploadId }, 201, cors);
+    }
+
+    const id = String(url.searchParams.get("upload") || "");
+    if (!id || id.length > 1024) return json({ error: "no upload to add to" }, 400, cors);
+    const up = env.DELIVERIES.resumeMultipartUpload(key, id);
+
+    if (step === "part") {
+      const n = Number(url.searchParams.get("part"));
+      if (!Number.isInteger(n) || n < 1 || n > 10000) return json({ error: "bad part number" }, 400, cors);
+      const size = statedSize(request);
+      if (size < 0) return json({ error: NO_SIZE }, 411, cors);
+      if (size > MAX_UPLOAD) return json({ error: "that part is too big" }, 413, cors);
+      const part = await up.uploadPart(n, request.body);
+      return json({ part: part.partNumber, etag: part.etag }, 201, cors);
+    }
+
+    if (step === "done") {
+      let body;
+      try { body = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+      const parts = (Array.isArray(body.parts) ? body.parts : [])
+        .map((p) => ({ partNumber: Number(p.part), etag: String(p.etag || "") }))
+        .filter((p) => Number.isInteger(p.partNumber) && p.etag);
+      if (!parts.length) return json({ error: "no parts to join" }, 400, cors);
+      await up.complete(parts);
+      return json({ ok: true }, 201, cors);
+    }
+
+    if (step === "abort") {
+      await up.abort();
+      return json({ ok: true }, 200, cors);
+    }
+
+    return json({ error: "unknown step" }, 400, cors);
+  } catch (err) {
+    console.log("upload in parts failed at " + step + ":", String(err));
+    return json({ error: "could not store it (" + step + ")" }, 502, cors);
+  }
+}
+
 function deliveryKey(client, month, name) {
   return client + "/" + month + "/" + name;
 }
@@ -1319,12 +1378,19 @@ async function acceptDelivery(request, env, cors) {
     return json({ error: "that key cannot write to this studio" }, 403, cors);
   }
 
+  // a file too big for one request arrives in parts, see inParts
+  const step = url.searchParams.get("step");
+  if (step) {
+    return inParts(step, request, url, env, cors, deliveryKey(client, month, name),
+      request.headers.get("X-File-Type") || "application/octet-stream");
+  }
+
   const size = statedSize(request);
   if (size < 0) return json({ error: NO_SIZE }, 411, cors);
   if (size > MAX_UPLOAD) {
     return json({
       error: "that file is over 95MB, which is more than one upload can carry. " +
-        "Export it smaller, or split the delivery."
+        "Reload the page so it sends it in parts."
     }, 413, cors);
   }
 
@@ -3502,10 +3568,16 @@ async function handleTransfer(request, env, cors) {
     const name = safeName(url.searchParams.get("name"));
     if (!name) return json({ error: "that file name cannot be used" }, 400, cors);
 
+    const step = url.searchParams.get("step");
+    if (step) {
+      return inParts(step, request, url, env, cors, transferFileKey(id, name),
+        request.headers.get("X-File-Type") || "application/octet-stream");
+    }
+
     const size = statedSize(request);
     if (size < 0) return json({ error: NO_SIZE }, 411, cors);
     if (size > MAX_UPLOAD) {
-      return json({ error: "that file is over 95MB, which is more than one upload can carry." }, 413, cors);
+      return json({ error: "that file is over 95MB, which is more than one upload can carry. Reload the page so it sends it in parts." }, 413, cors);
     }
 
     await env.DELIVERIES.put(transferFileKey(id, name), request.body, {
