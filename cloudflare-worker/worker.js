@@ -938,6 +938,31 @@ const langButtons = () => ({
   ]]
 });
 
+/* The reels mails ask which page first: the niche and the currency,
+   since a tattoo artist in the States should land on the tattoo page in
+   dollars. One tap picks both. */
+const PAGE_KINDS = ["reels", "shoot"];
+const REEL_PAGES = [
+  ["restaurant", "Restaurants"],
+  ["tattoo", "Tattoo artists"],
+  ["interview", "Interviews"]
+];
+const pageButtons = (lang, kind) => ({
+  inline_keyboard: [
+    ...REEL_PAGES.map(([niche, label]) => [
+      { text: label + " €", callback_data: "fu:" + lang + ":" + kind + ":" + niche },
+      { text: label + " $", callback_data: "fu:" + lang + ":" + kind + ":" + niche + "-usd" }
+    ]),
+    [{ text: "Back", callback_data: "fl:" + lang }]
+  ]
+});
+function pageOf(slug) {
+  const m = /^(restaurant|tattoo|interview)(-usd)?$/.exec(String(slug || ""));
+  if (!m) return null;
+  const label = REEL_PAGES.find(([n]) => n === m[1])[1];
+  return { niche: m[1], usd: !!m[2], label: label + (m[2] ? ", dollars" : ", euros") };
+}
+
 const mailButtons = (lang) => ({
   inline_keyboard: [
     ...Object.entries(FOLLOW_UPS[lang].mails).map(([kind, m]) => [{ text: m.button, callback_data: "fu:" + lang + ":" + kind }]),
@@ -1005,11 +1030,16 @@ async function followUpTap(env, q) {
     });
     return answer();
   }
+  // the reels mails need to know which page and which currency first
+  if (step === "fu" && PAGE_KINDS.includes(kind) && !slug && FOLLOW_UPS[lang]) {
+    await edit(LANG_NAME[lang] + ". Which page should it link to?", pageButtons(lang, kind));
+    return answer();
+  }
   if (step === "fu" && mail) {
     await edit("<b>" + esc(mail.subject) + "</b>\n\n" + esc(followUpText(lang, mail, who)), {
       inline_keyboard: [[
         { text: "Send", callback_data: "fs:" + pick },
-        { text: "Back", callback_data: slug ? "fu:" + lang + ":p" : "fl:" + lang }
+        { text: "Back", callback_data: slug ? "fu:" + lang + ":" + kind : "fl:" + lang }
       ]]
     });
     return answer();
@@ -1032,7 +1062,7 @@ async function followUpTap(env, q) {
       message_id: message.message_id,
       parse_mode: "HTML",
       text: "<b>Sent to " + esc(who.name) + "</b>\n" + esc(who.email) + "\n\n" +
-        esc(mail.button + ", " + LANG_NAME[lang] + ". A copy is in your inbox.")
+        esc(mail.button + (mail.page ? " (" + mail.page + ")" : "") + ", " + LANG_NAME[lang] + ". A copy is in your inbox.")
     });
     return answer("Sent.");
   }
@@ -1043,6 +1073,14 @@ async function followUpTap(env, q) {
 async function followUpMail(env, lang, kind, slug) {
   const words = FOLLOW_UPS[lang];
   if (!words || !kind || !words.mails[kind]) return null;
+  if (PAGE_KINDS.includes(kind)) {
+    const page = pageOf(slug);
+    if (!page) return null;
+    const base = words.mails[kind];
+    const url = "https://noiraunoir.com/reels/" + page.niche + "/" + (page.usd ? "?usd" : "") +
+      (kind === "shoot" ? "#lock" : "");
+    return { ...base, page: page.label, link: { text: base.link.text, url } };
+  }
   if (kind !== "p") return words.mails[kind];
   if (!slug || !/^[A-Za-z0-9_-]{6,40}$/.test(slug)) return null;
   const proposal = await readProposal(env, BRIEF_REPO, slug);
