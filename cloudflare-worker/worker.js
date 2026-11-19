@@ -70,7 +70,7 @@ const AUDIO_TYPES = {
 };
 const ALLOWED_ORIGINS = [
   "https://vollerodaniele-rgb.github.io",
-  "https://sakas.noiraunoir.com",
+  // sakas.noiraunoir.com is gone from DNS since 24 Sept; its portal is noiraunoir.com/sakas/
   "https://sakasidea.noiraunoir.com",
   "https://kresha.noiraunoir.com",
   "http://localhost:4173",
