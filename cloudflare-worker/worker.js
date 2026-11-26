@@ -372,6 +372,10 @@ export default {
       return recordSeen(request, env, ctx, cors);
     }
 
+    if (new URL(request.url).pathname === "/idea/answer") {
+      return ideaAnswer(request, env, cors);
+    }
+
     if (new URL(request.url).pathname === "/shoot-confirmed") {
       return sendShootInvite(request, env, cors);
     }
@@ -4113,6 +4117,39 @@ function describeDevice(ua) {
     : "";
 
   return [os, browser].filter(Boolean).join(", ") || "unknown device";
+}
+
+/* The two buttons at the end of an idea deck: "I like it" and "Change
+   something". Only for a deck that exists, and only a Telegram message
+   to him: nothing is mailed to anyone, so the worst a stranger with the
+   link can do is send him a note, inside the per minute budget every
+   address already has. */
+async function ideaAnswer(request, env, cors) {
+  if (request.method !== "POST") return json({ error: "POST only" }, 405, cors);
+  let data;
+  try { data = await request.json(); } catch { return json({ error: "invalid JSON" }, 400, cors); }
+
+  const slug = String(data.client || "");
+  if (!CLIENT_RE.test(slug)) return json({ error: "unknown idea" }, 400, cors);
+  const answer = data.answer === "change" ? "change" : data.answer === "like" ? "like" : "";
+  if (!answer) return json({ error: "no answer" }, 400, cors);
+
+  const idea = await readProposal(env, CLIENTS_REPO, slug, "ideas");
+  if (!idea) return json({ error: "unknown idea" }, 404, cors);
+
+  const brand = String(idea.client || slug).trim();
+  const name = String(data.name || "").trim().slice(0, 60);
+  const note = String(data.note || "").trim().slice(0, 1000);
+
+  await telegram(env, [
+    "<b>" + esc(brand) + (answer === "like" ? " likes the idea</b>" : " wants something changed</b>"),
+    name ? "From " + esc(name) : "",
+    note ? "\n" + esc(note) : "",
+    "",
+    "https://noiraunoir.com/i/" + slug + "/"
+  ].filter((l) => l !== "").join("\n"));
+
+  return json({ ok: true }, 200, cors);
 }
 
 async function countView(env, slug, who, kind) {
