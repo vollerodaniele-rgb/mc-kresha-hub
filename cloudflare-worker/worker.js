@@ -4089,7 +4089,8 @@ async function recordSeen(request, env, ctx, cors) {
     coords: (cf.latitude && cf.longitude) ? cf.latitude + "," + cf.longitude : ""
   };
 
-  ctx.waitUntil(countView(env, slug, who));
+  // an idea deck (i/<slug>/) reports the same way as a proposal
+  ctx.waitUntil(countView(env, slug, who, data.kind === "idea" ? "idea" : "proposal"));
   return json({ ok: true }, 202, cors);
 }
 
@@ -4114,7 +4115,8 @@ function describeDevice(ua) {
   return [os, browser].filter(Boolean).join(", ") || "unknown device";
 }
 
-async function countView(env, slug, who) {
+async function countView(env, slug, who, kind) {
+  const idea = kind === "idea";
   const repo = CLIENTS_REPO;
   const headers = {
     "Authorization": "Bearer " + env.GITHUB_TOKEN,
@@ -4124,12 +4126,13 @@ async function countView(env, slug, who) {
   };
 
   // a proposal that does not exist is not worth a record
-  const proposal = await readProposal(env, repo, slug);
+  const proposal = await readProposal(env, repo, slug, idea ? "ideas" : "proposals");
   if (!proposal) return;
   const brand = String(proposal.client || slug).trim();
+  const tag = (idea ? "idea:" : "proposal:") + slug;
 
   try {
-    const labels = encodeURIComponent("seen,proposal:" + slug);
+    const labels = encodeURIComponent("seen," + tag);
     const found = await fetch(
       `https://api.github.com/repos/${repo}/issues?labels=${labels}&state=all&per_page=1`,
       { headers }
@@ -4150,14 +4153,14 @@ async function countView(env, slug, who) {
     } else {
       await fetch(`https://api.github.com/repos/${repo}/issues`, {
         method: "POST", headers,
-        body: JSON.stringify({ title: "Seen: " + brand, body, labels: ["seen", "proposal:" + slug] })
+        body: JSON.stringify({ title: (idea ? "Seen idea: " : "Seen: ") + brand, body, labels: ["seen", tag] })
       });
     }
 
     // every single open, as asked
     const w = who || {};
     await telegram(env, [
-      "<b>" + esc(brand) + " opened the proposal</b>",
+      "<b>" + esc(brand) + (idea ? " opened the idea</b>" : " opened the proposal</b>"),
       "",
       count === 1 ? "First time." : "That is " + count + " times now.",
       w.device ? esc(w.device) : "",
@@ -4167,7 +4170,7 @@ async function countView(env, slug, who) {
       w.ip ? "IP " + esc(w.ip) : "",
       w.coords ? "Roughly https://www.google.com/maps?q=" + esc(w.coords) : "",
       "",
-      "https://noiraunoir.com/p/" + slug + "/"
+      "https://noiraunoir.com/" + (idea ? "i/" : "p/") + slug + "/"
     ].filter((l) => l !== "").join("\n"));
   } catch (err) {
     console.log("could not record a view:", String(err));
@@ -4325,10 +4328,10 @@ async function readJson(env, repo, path) {
 
 /* Reads the proposal itself. Used for the brand in a subject line, and
    as the guard on client mail: no proposal, no mail to anybody. */
-async function readProposal(env, repo, slug) {
+async function readProposal(env, repo, slug, folder) {
   try {
     const res = await fetch(
-      `https://raw.githubusercontent.com/${repo}/main/proposals/${encodeURIComponent(slug)}.json`,
+      `https://raw.githubusercontent.com/${repo}/main/${folder || "proposals"}/${encodeURIComponent(slug)}.json`,
       { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN }, cf: { cacheTtl: 60, cacheEverything: true } }
     );
     if (!res.ok) return null;
