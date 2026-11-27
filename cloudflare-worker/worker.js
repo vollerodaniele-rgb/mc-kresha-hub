@@ -334,7 +334,7 @@ export default {
       if (url.pathname === "/file") return serveDelivery(url, env, request, ctx);
       if (url.pathname === "/thumb") return serveThumb(url, env, request, ctx);
       if (url.pathname === "/transfer") return readTransfer(url, env, cors);
-      if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx);
+      if (url.pathname === "/transfer/file") return serveTransferFile(url, env, ctx, request);
       if (url.pathname === "/transfers") return listTransfers(request, url, env, cors);
       if (url.pathname === "/call/slots") return openSlots(env, ctx, cors);
       if (url.pathname === "/call/booking") return readBookingToMove(url, env, cors);
@@ -3773,20 +3773,98 @@ async function mailTransfer(env, { to, id, meta, count, size }) {
    Counted when the file starts being sent, not when it finishes, since
    nothing tells us about the finish. A cancelled download still counts,
    which is the honest limit of doing this without a tracker. */
-async function noteDownload(env, id, name) {
+async function noteDownload(env, id, name, request) {
   try {
     const meta = await readMeta(env, id);
     if (!meta) return;
 
     if (!meta.downloads || typeof meta.downloads !== "object") meta.downloads = {};
     const before = meta.downloads[name] || { count: 0, last: "" };
-    meta.downloads[name] = { count: before.count + 1, last: new Date().toISOString() };
+    const now = new Date();
+    meta.downloads[name] = { count: before.count + 1, last: now.toISOString() };
+
+    /* And a Telegram message, so "did they get it" answers itself.
+       "Download all" fetches the files one after another, so every
+       file within ten minutes of the last one goes into the same
+       message, edited in place, rather than seven pings. */
+    const ping = meta.ping && typeof meta.ping === "object" ? meta.ping : null;
+    const fresh = ping && ping.msg && (now - Date.parse(ping.last || 0)) < 10 * 60 * 1000;
+    const names = fresh ? [...new Set([...(ping.names || []), name])] : [name];
+    let total = 0;
+    try {
+      total = (await env.DELIVERIES.list({ prefix: TRANSFER_PREFIX + id + "/files/", limit: 500 })).objects.length;
+    } catch { /* the message just leaves the total out */ }
+
+    const cf = (request && request.cf) || {};
+    const device = request ? describeDevice(request.headers.get("User-Agent") || "") : "";
+    const place = [cf.city, cf.country].filter(Boolean).join(", ");
+    const ip = request ? request.headers.get("CF-Connecting-IP") || "" : "";
+    const when = now.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Europe/Brussels" });
+    const text = [
+      "<b>Downloaded: " + esc(meta.title || "a file link") + "</b>",
+      names.length + (total ? " of " + total : "") + " file" + (names.length === 1 && !total ? "" : "s") +
+        (total && names.length >= total ? ", all of them" : "") + ", last at " + when,
+      "",
+      names.slice(0, 30).map((n) => "• " + esc(n)).join("\n") + (names.length > 30 ? "\n• and " + (names.length - 30) + " more" : ""),
+      "",
+      [
+        [device, place].filter(Boolean).map(esc).join(" · "),
+        ip ? "IP " + esc(ip) : "",
+        "https://noiraunoir.com/t/#" + id
+      ].filter(Boolean).join("\n")
+    ].join("\n");
+
+    let msg = fresh ? ping.msg : 0;
+    if (msg) {
+      if (!await telegramEdit(env, msg, text)) msg = 0;
+    }
+    if (!msg) msg = await telegramSend(env, text);
+    meta.ping = msg ? { msg, last: now.toISOString(), names } : null;
 
     await env.DELIVERIES.put(metaKey(id), JSON.stringify(meta), {
       httpMetadata: { contentType: "application/json" }
     });
   } catch (err) {
     console.log("could not note a download:", String(err));
+  }
+}
+
+/* Like telegram(), but hands back the message id, so a message can be
+   updated later instead of followed by another one. */
+async function telegramSend(env, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return 0;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text, parse_mode: "HTML", disable_web_page_preview: true })
+    });
+    if (!res.ok) { console.log("telegram failed:", res.status, await res.text()); return 0; }
+    const data = await res.json();
+    return (data.result && data.result.message_id) || 0;
+  } catch (err) {
+    console.log("telegram error:", String(err));
+    return 0;
+  }
+}
+
+async function telegramEdit(env, messageId, text) {
+  if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return false;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/editMessageText`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, message_id: messageId, text, parse_mode: "HTML", disable_web_page_preview: true })
+    });
+    // "message is not modified" is a success: it already says this
+    if (res.ok) return true;
+    const body = await res.text();
+    if (/not modified/i.test(body)) return true;
+    console.log("telegram edit failed:", res.status, body);
+    return false;
+  } catch (err) {
+    console.log("telegram edit error:", String(err));
+    return false;
   }
 }
 
@@ -3818,7 +3896,7 @@ async function readTransfer(url, env, cors) {
   }, 200, cors);
 }
 
-async function serveTransferFile(url, env, ctx) {
+async function serveTransferFile(url, env, ctx, request) {
   if (!env.DELIVERIES) return new Response("storage is not connected", { status: 503 });
 
   const id = String(url.searchParams.get("id") || "");
@@ -3832,8 +3910,9 @@ async function serveTransferFile(url, env, ctx) {
   const object = await env.DELIVERIES.get(transferFileKey(id, name));
   if (!object) return new Response("not found", { status: 404 });
 
-  // noted after the reply is on its way, so nobody waits on bookkeeping
-  if (ctx) ctx.waitUntil(noteDownload(env, id, name));
+  // noted after the reply is on its way, so nobody waits on bookkeeping.
+  // Not his own: the page adds me=1 when the studio key is in that browser.
+  if (ctx && request && request.method === "GET" && url.searchParams.get("me") !== "1") ctx.waitUntil(noteDownload(env, id, name, request));
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
