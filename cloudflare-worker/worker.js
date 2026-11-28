@@ -1579,6 +1579,8 @@ async function listDelivery(url, env, cors) {
    dashboard can read), so it is behind the key and the portal must
    exist. When it went out is remembered per month, without the address. */
 const toldKey = (client, month) => "_told/" + client + "/" + month + ".json";
+// when a client last opened their own page (the portal reports it)
+const openedKey = (client) => "_opened/" + client + ".json";
 const READY_FILM = /\.(mp4|mov|m4v|webm)$/i;
 const READY_PICTURE = /\.(jpe?g|png|webp|heic|heif|tiff?)$/i;
 
@@ -4153,6 +4155,29 @@ async function recordSeen(request, env, ctx, cors) {
   const slug = String(data.client || "");
   if (!CLIENT_RE.test(slug)) return json({ error: "unknown proposal" }, 400, cors);
 
+  /* A client opening their own page is not news worth a ping; only
+     the date is kept, so the morning brief can tell when a client has
+     gone quiet. Only for a client that has deliveries, so a made up
+     name stores nothing. */
+  if (data.kind === "portal") {
+    const client = slug.toLowerCase();
+    if (env.DELIVERIES) {
+      ctx.waitUntil((async () => {
+        try {
+          const has = await env.DELIVERIES.list({ prefix: client + "/", limit: 1 });
+          if (!has.objects.length) return;
+          const before = await readRecord(env, openedKey(client)) || { count: 0 };
+          await env.DELIVERIES.put(openedKey(client),
+            JSON.stringify({ last: new Date().toISOString(), count: (before.count || 0) + 1 }),
+            { httpMetadata: { contentType: "application/json" } });
+        } catch (err) {
+          console.log("could not note a portal open:", String(err));
+        }
+      })());
+    }
+    return json({ ok: true }, 202, cors);
+  }
+
   /* Who and where, read off the request itself. Cloudflare hands these
      over with no extra service and no tracker on the page.
 
@@ -4689,6 +4714,65 @@ const daysSince = (iso) => {
   return then ? Math.floor((Date.now() - then) / 86400000) : 0;
 };
 
+/* Clients slipping away before they say so. Two signs:
+
+   - told their delivery is ready, and three days later they still
+     have not opened their page;
+   - no shoot in 45 days and none booked (monthly and reels clients;
+     an event client is a one off, so silence there is normal).
+
+   Each shows on the day it starts and then every Monday, so a client
+   who stays quiet is a weekly nudge rather than a daily one.
+
+   Page opens are only known from 28 Nov 2026 on, so a delivery told
+   before that is never called unopened: they may well have opened it. */
+const QUIET_OPENS_FROM = "2026-11-28";
+const QUIET_UNOPENED_DAYS = 3;
+const QUIET_NO_SHOOT_DAYS = 45;
+
+async function goingQuiet(env, plans, today, monday) {
+  const out = [];
+  if (!env.DELIVERIES) return out;
+  const plural = (n, one) => n + " " + one + (n === 1 ? "" : "s");
+
+  for (const { name, plan } of plans) {
+    if (plan.rolling || name === "demo") continue;
+    const brand = plan.name || name;
+    try {
+      // the last delivery they were told about
+      const toldList = await env.DELIVERIES.list({ prefix: "_told/" + name + "/", limit: 100 });
+      const lastKey = toldList.objects.map((o) => o.key).sort().pop();
+      const told = lastKey ? await readRecord(env, lastKey) : null;
+      const month = lastKey ? lastKey.split("/").pop().replace(/\.json$/, "") : "";
+      const opened = await readRecord(env, openedKey(name));
+
+      if (told && told.at && told.at.slice(0, 10) >= QUIET_OPENS_FROM &&
+          !(opened && opened.last && opened.last > told.at)) {
+        const age = daysSince(told.at);
+        // a month on, the "nothing in 45 days" line below says it better
+        if (age >= QUIET_UNOPENED_DAYS && age <= 30 && (monday || age === QUIET_UNOPENED_DAYS)) {
+          out.push(brand + " has not opened " + readyMonthName(plan, month) +
+            ", told " + plural(age, "day") + " ago");
+        }
+      }
+
+      if (plan.kind === "event") continue;
+      const shoot = (plan.nextShoot && plan.nextShoot.date) || "";
+      if (shoot >= today) continue;   // one is booked
+      const last = [shoot, told && told.at ? told.at.slice(0, 10) : ""].filter(Boolean).sort().pop();
+      if (!last) continue;
+      const age = daysSince(last + "T12:00:00Z");
+      if (age >= QUIET_NO_SHOOT_DAYS && (monday || age === QUIET_NO_SHOOT_DAYS)) {
+        const seen = opened && opened.last ? ", page last opened " + plural(daysSince(opened.last), "day") + " ago" : "";
+        out.push(brand + ": nothing in " + plural(age, "day") + " (last " + prettyDate(last) + "), no shoot booked" + seen);
+      }
+    } catch (err) {
+      console.log("quiet check failed for " + name + ":", String(err));
+    }
+  }
+  return out;
+}
+
 async function morningBrief(env, sayNothing) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
 
@@ -4790,6 +4874,13 @@ async function morningBrief(env, sayNothing) {
     if (lines.length) lines.push("");
     lines.push("<b>Running out of month</b>");
     for (const b of behind) lines.push(esc(b));
+  }
+
+  const quiet = await goingQuiet(env, plans, today, sayNothing);
+  if (quiet.length) {
+    if (lines.length) lines.push("");
+    lines.push("<b>Going quiet</b>");
+    for (const q of quiet) lines.push(esc(q));
   }
 
   if (!lines.length) {
