@@ -710,6 +710,9 @@ async function serveAudio(url, env) {
 
 async function notifyTelegram(env, { site, client, name, email, idea, hasImage, hasVoice }) {
   if (!env.TELEGRAM_BOT_TOKEN || !env.TELEGRAM_CHAT_ID) return;
+  // people trying the example portal are playing, not asking: no ping
+  // (the submission itself is still kept as usual)
+  if (DEMO_CLIENTS.includes(String(client || "").toLowerCase())) return;
 
   const meta = SITES[site] || {};
   const who = !meta.perClient || !client ? meta.name
@@ -4623,6 +4626,9 @@ function prettyDate(iso) {
    same as a week with nothing in it. */
 
 const BRIEF_REPO = "vollerodaniele-rgb/clients";
+// example portals shown to prospects; anything they do is not real
+const DEMO_CLIENTS = ["demo", "_example"];
+
 const BRIEF_RESERVED = ["admin", "assets", "data", "_template", "p", "proposals",
                         "_proposal", "i", "boxes", "_box", "uploads"];
 
@@ -4656,7 +4662,11 @@ async function clientPlans(env) {
         `https://raw.githubusercontent.com/${BRIEF_REPO}/main/data/${encodeURIComponent(name)}.json`,
         { headers: { "Authorization": "Bearer " + env.GITHUB_TOKEN } }
       );
-      if (res.ok) out.push({ name, plan: await res.json() });
+      if (!res.ok) continue;
+      const plan = await res.json();
+      // the example portals never need him: no shoots, months or quiet clients from them
+      if (plan.rolling || plan.notice || DEMO_CLIENTS.includes(name.toLowerCase())) continue;
+      out.push({ name, plan });
     }
   } catch (err) {
     console.log("brief could not read the clients:", String(err));
